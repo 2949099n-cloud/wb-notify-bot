@@ -20,13 +20,13 @@ class FakeBot:
     def __init__(self):
         self.sent = 0
 
-    async def send_photo(self, chat_id, photo, caption=None, parse_mode=None):
+    async def send_photo(self, chat_id, photo, caption=None, parse_mode=None, reply_markup=None):
         self.sent += 1
 
     async def send_media_group(self, chat_id, media):
         self.sent += 1
 
-    async def send_message(self, chat_id, text, parse_mode=None):
+    async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
         self.sent += 1
 
 

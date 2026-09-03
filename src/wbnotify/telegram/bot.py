@@ -12,6 +12,7 @@ from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     ConversationHandler,
@@ -23,6 +24,8 @@ from telegram.request import HTTPXRequest
 from wbnotify import shops_repo
 from wbnotify.config import Config
 from wbnotify.db import db_session
+from wbnotify.telegram.formatters import PARSE_MODE, format_stocks_detail
+from wbnotify.telegram.keyboards import ACTION_APPEARANCE, ACTION_MUTE, ACTION_STOCKS, parse_callback
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +81,80 @@ async def addshop_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ConversationHandler.END
 
 
+EVENT_TITLES = {
+    "order": "заказы",
+    "cancel": "отмены заказов",
+    "buyout": "продажи",
+    "return": "возвраты",
+}
+
+
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Нажатия инлайн-кнопок под уведомлением.
+
+    Кнопка живёт дольше сообщения: всё, кроме действия и товара, подтягивается
+    из БД в момент нажатия, поэтому старое уведомление тоже отработает корректно.
+    """
+    query = update.callback_query
+    await query.answer()  # убрать «часики» у кнопки
+
+    config: Config = context.bot_data["config"]
+    action, shop_id, nm_id, extra = parse_callback(query.data)
+    chat_id = update.effective_chat.id
+
+    with db_session(config.db_path) as conn:
+        shop = conn.execute("SELECT telegram_chat_id FROM shops WHERE id = ?", (shop_id,)).fetchone()
+        # Изоляция: кнопка действует только в том чате, которому принадлежит магазин.
+        if shop is None or shop["telegram_chat_id"] != chat_id:
+            await query.message.reply_text("Этот магазин не привязан к текущему чату.")
+            return
+
+        if action == ACTION_STOCKS:
+            await query.message.reply_text(format_stocks_detail(conn, shop_id, nm_id), parse_mode=PARSE_MODE)
+
+        elif action == ACTION_MUTE:
+            conn.execute(
+                "INSERT OR IGNORE INTO chat_mutes (chat_id, event_type, shop_id) VALUES (?, ?, ?)",
+                (chat_id, extra, shop_id),
+            )
+            conn.commit()
+            await query.message.reply_text(
+                f"🔕 Больше не присылаю «{EVENT_TITLES.get(extra, extra)}» по этому магазину.\n"
+                f"Вернуть — /settings"
+            )
+
+        elif action == ACTION_APPEARANCE:
+            await query.message.reply_text(_settings_text(conn, chat_id), parse_mode=PARSE_MODE)
+
+
+def _settings_text(conn, chat_id: int) -> str:
+    muted = conn.execute(
+        "SELECT event_type, shop_id FROM chat_mutes WHERE chat_id = ?", (chat_id,)
+    ).fetchall()
+    if not muted:
+        return "⚙️ Настройки\n\nСейчас приходят все типы уведомлений.\nОтключить тип — кнопка «Не показывать такие» под уведомлением."
+    lines = ["⚙️ Настройки", "", "Отключены:"]
+    for row in muted:
+        lines.append(f"   • {EVENT_TITLES.get(row['event_type'], row['event_type'])}")
+    lines.append("")
+    lines.append("Включить обратно всё — /unmute")
+    return "\n".join(lines)
+
+
+async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: Config = context.bot_data["config"]
+    with db_session(config.db_path) as conn:
+        await update.message.reply_text(_settings_text(conn, update.effective_chat.id), parse_mode=PARSE_MODE)
+
+
+async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: Config = context.bot_data["config"]
+    with db_session(config.db_path) as conn:
+        conn.execute("DELETE FROM chat_mutes WHERE chat_id = ?", (update.effective_chat.id,))
+        conn.commit()
+    await update.message.reply_text("🔔 Все типы уведомлений включены обратно.")
+
+
 def build_application(config: Config) -> Application:
     # HTTPXRequest с увеличенными таймаутами — дефолтные 5с оказались маловаты
     # для sendMediaGroup из нескольких фото (см. telegram/sender.py:make_bot).
@@ -86,6 +163,9 @@ def build_application(config: Config) -> Application:
     app.bot_data["config"] = config
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("settings", settings_command))
+    app.add_handler(CommandHandler("unmute", unmute_command))
+    app.add_handler(CallbackQueryHandler(on_button))
     app.add_handler(
         ConversationHandler(
             entry_points=[CommandHandler("addshop", addshop_start)],

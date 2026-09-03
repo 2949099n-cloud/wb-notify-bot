@@ -9,14 +9,14 @@ class FakeBot:
     def __init__(self):
         self.calls = []
 
-    async def send_photo(self, chat_id, photo, caption=None, parse_mode=None):
+    async def send_photo(self, chat_id, photo, caption=None, parse_mode=None, reply_markup=None):
         self.calls.append(("send_photo", photo, caption))
 
     async def send_media_group(self, chat_id, media):
         # InputMediaPhoto(media=bytes) заворачивает байты в InputFile — достаём обратно.
         self.calls.append(("send_media_group", [(m.media.input_file_content, m.caption) for m in media]))
 
-    async def send_message(self, chat_id, text, parse_mode=None):
+    async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
         self.calls.append(("send_message", text))
 
 

@@ -1,0 +1,31 @@
+[Unit]
+Description=wb-notify-bot — Telegram-бот (команды и кнопки меню)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wbnotify
+WorkingDirectory=/opt/wb-notify-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Europe/Moscow
+# Отдельный процесс от планировщика: этот держит getUpdates и обрабатывает
+# /addshop, /settings и нажатия инлайн-кнопок. Планировщик (wbnotify.service)
+# только опрашивает WB и отправляет уведомления — нажатия к нему не приходят.
+ExecStart=/opt/wb-notify-bot/.venv/bin/python -c "import sys; sys.path.insert(0, 'src'); from wbnotify.telegram.bot import run; run()"
+
+Restart=always
+RestartSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wbnotify-bot
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/wb-notify-bot/data
+
+[Install]
+WantedBy=multi-user.target

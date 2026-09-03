@@ -49,6 +49,10 @@ def _esc(value: object) -> str:
 # источник значения (решение пользователя, см. CLAUDE.md).
 _IL_DISABLED_VALUE = "0"
 
+# Окна для оценки «на сколько хватит» в «Остатках подробно» — три сразу
+# (решение пользователя), а не одно дефолтное, как в блоке уведомления.
+STOCK_WINDOWS = (7, 30, 60)
+
 
 def _fmt_money(value: float | None) -> str:
     if value is None:
@@ -257,6 +261,55 @@ def _stock_lines(
         eta = stock_days_aggregate(conn, shop_id, nm_id, tech_size, window_days=7, basis=basis)
         lines.append(f"   {tech_size} ({wb_qty}шт+{seller_qty}шт) ≈ на {eta} дн. ({basis_label})")
     return "\n".join(lines)
+
+
+def format_stocks_detail(conn: sqlite3.Connection, shop_id: int, nm_id: int) -> str:
+    """«Остатки подробно» — по каждому размеру, с оценкой на 7/30/60 дней.
+
+    ВАЖНО про разбивку по складам. В исходном ТЗ предполагалось расписать остаток
+    по каждому складу WB, но проверено вживую на всех трёх методах WB
+    (stocks-report/wb-warehouses, /seller-warehouses, /api/v2/stocks-report/offices):
+    WB отдаёт остатки складов WB ОДНИМ агрегатом («Склад WB», warehouseId=-999999),
+    поле offices во всех ответах пустое. Детализация есть только по складам
+    продавца — она приходит из Marketplace API. Поэтому строки ниже — это
+    «склады WB одной суммой» + каждый склад продавца отдельно; расписать WB
+    подробнее нечем, это ограничение API, а не упрощение с нашей стороны.
+    """
+    card = _card(conn, shop_id, nm_id)
+    if card is None or not card["sizes_json"]:
+        return "📦 Остатки на складах:\n\nНет данных по карточке товара."
+
+    lines = ["📦 Остатки на складах:", ""]
+    for size in json.loads(card["sizes_json"]):
+        tech_size = size.get("techSize")
+        chrt_id = size.get("chrtID")
+        rows = conn.execute(
+            """
+            SELECT warehouse_kind, warehouse_name, SUM(quantity) AS qty
+            FROM stocks_current
+            WHERE shop_id=? AND nm_id=? AND chrt_id=? AND quantity > 0
+            GROUP BY warehouse_kind, warehouse_name
+            ORDER BY qty DESC
+            """,
+            (shop_id, nm_id, chrt_id),
+        ).fetchall()
+        total = sum(r["qty"] for r in rows)
+
+        if not total:
+            lines.append(f"🔪 Размер {_esc(tech_size)} (0 шт)")
+            lines.append("")
+            continue
+
+        etas = "/".join(
+            stock_days_aggregate(conn, shop_id, nm_id, tech_size, window_days=w) for w in STOCK_WINDOWS
+        )
+        lines.append(f"🔪 Размер {_esc(tech_size)} ({total} шт ≈ {etas} дн. за {'/'.join(map(str, STOCK_WINDOWS))} дн.):")
+        for row in rows:
+            name = "Склады WB" if row["warehouse_kind"] == "wb" else _esc(row["warehouse_name"] or "склад продавца")
+            lines.append(f"   • {name}: {row['qty']} шт.")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
 
 
 def _card_analytics_block(

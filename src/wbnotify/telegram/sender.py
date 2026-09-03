@@ -31,6 +31,7 @@ from telegram.request import HTTPXRequest
 from wbnotify.counters import now_msk
 from wbnotify.db import utcnow
 from wbnotify.models import ShopRow
+from wbnotify.telegram.keyboards import notification_keyboard
 from wbnotify.telegram.formatters import (
     CAPTION_LIMIT,
     PARSE_MODE,
@@ -80,17 +81,21 @@ async def _download_photos(urls: list[str]) -> list[bytes]:
     return photos
 
 
-async def send_notification(bot: Bot, chat_id: int, text: str, photo_urls: list[str]) -> None:
+async def send_notification(
+    bot: Bot, chat_id: int, text: str, photo_urls: list[str], keyboard=None
+) -> None:
     """`photo_urls` — 0..N фото карусели (см. cards_cache.photos_json, обычно до 3-х)."""
     photos = await _download_photos(photo_urls)
 
     if not photos:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode=PARSE_MODE)
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode=PARSE_MODE, reply_markup=keyboard)
         return
 
     if len(photos) == 1:
         if len(text) <= CAPTION_LIMIT:
-            await bot.send_photo(chat_id=chat_id, photo=photos[0], caption=text, parse_mode=PARSE_MODE)
+            await bot.send_photo(
+                chat_id=chat_id, photo=photos[0], caption=text, parse_mode=PARSE_MODE, reply_markup=keyboard
+            )
             return
         await bot.send_photo(chat_id=chat_id, photo=photos[0])
     else:
@@ -106,7 +111,9 @@ async def send_notification(bot: Bot, chat_id: int, text: str, photo_urls: list[
 
     # Фото(-карусель) отдельно, текст следующим сообщением, с пометкой — точный текст из ТЗ.
     note = f"Фото пришло отдельным сообщением — текст не поместился в подпись ({len(text)} из {CAPTION_LIMIT} символов)."
-    await bot.send_message(chat_id=chat_id, text=f"{note}\n\n{text}", parse_mode=PARSE_MODE)
+    await bot.send_message(
+        chat_id=chat_id, text=f"{note}\n\n{text}", parse_mode=PARSE_MODE, reply_markup=keyboard
+    )
 
 
 def _render(conn: sqlite3.Connection, shop: ShopRow, queue_row: sqlite3.Row) -> tuple[str, list[str]]:
@@ -184,11 +191,17 @@ async def drain_queue_for_shop(conn: sqlite3.Connection, bot: Bot, shop: ShopRow
     #    показать как раз надо.
     max_age_cutoff = (now_msk().date() - timedelta(days=MAX_EVENT_AGE_DAYS)).isoformat()
 
+    # Замьюченные типы событий просто не выбираются. Строки остаются pending и
+    # уходят из выборки сами, когда выпадут из окна давности — отдельный статус
+    # «muted» заводить не стали, чтобы не перестраивать таблицу ради этого.
     query = (
         "SELECT * FROM notification_queue WHERE shop_id = ? AND status = 'pending' "
-        "AND created_at >= ? AND (event_date IS NULL OR event_date >= ?) ORDER BY id"
+        "AND created_at >= ? AND (event_date IS NULL OR event_date >= ?) "
+        "AND event_type NOT IN ("
+        "  SELECT event_type FROM chat_mutes WHERE chat_id = ? AND (shop_id IS NULL OR shop_id = ?)"
+        ") ORDER BY id"
     )
-    params: list = [shop.id, notify_from, max_age_cutoff]
+    params: list = [shop.id, notify_from, max_age_cutoff, shop.telegram_chat_id, shop.id]
     if limit is not None:
         query += " LIMIT ?"
         params.append(limit)
@@ -198,7 +211,13 @@ async def drain_queue_for_shop(conn: sqlite3.Connection, bot: Bot, shop: ShopRow
     for row in rows:
         try:
             text, photo_urls = _render(conn, shop, row)
-            await send_notification(bot, shop.telegram_chat_id, text, photo_urls)
+            ref_row = conn.execute(
+                f"SELECT nm_id, tech_size FROM {row['ref_table']} WHERE id = ?", (row["ref_id"],)
+            ).fetchone()
+            keyboard = notification_keyboard(
+                shop.id, ref_row["nm_id"], row["event_type"], ref_row["tech_size"]
+            )
+            await send_notification(bot, shop.telegram_chat_id, text, photo_urls, keyboard)
         except (LookupError, ValueError, TelegramError) as exc:
             logger.error("notification_queue id=%s: ошибка отправки: %s", row["id"], exc)
             conn.execute(

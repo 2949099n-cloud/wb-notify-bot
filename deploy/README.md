@@ -108,11 +108,15 @@ sudo -u wbnotify .venv/bin/python scripts/check_connectivity.py
 
 ## 8. Запустить как сервис
 
+Процессов два: `wbnotify` — планировщик (опрос WB и рассылка уведомлений),
+`wbnotify-bot` — сам бот (команды `/addshop`, `/settings` и нажатия кнопок меню).
+Нажатия к планировщику не приходят, поэтому нужны оба.
+
 ```bash
-cp deploy/wbnotify.service /etc/systemd/system/
+cp deploy/wbnotify.service deploy/wbnotify-bot.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now wbnotify
-systemctl status wbnotify
+systemctl enable --now wbnotify wbnotify-bot
+systemctl status wbnotify wbnotify-bot
 ```
 
 `enable` — автозапуск после перезагрузки сервера, `Restart=always` в юните —
@@ -121,8 +125,8 @@ systemctl status wbnotify
 Логи:
 
 ```bash
-journalctl -u wbnotify -f          # в реальном времени
-journalctl -u wbnotify --since today
+journalctl -u wbnotify -u wbnotify-bot -f          # в реальном времени
+journalctl -u wbnotify -u wbnotify-bot --since today
 ```
 
 ## 9. Включить рассылку
@@ -142,12 +146,29 @@ sudo -u wbnotify .venv/bin/python scripts/notify_cli.py start-notifying --shop-i
 
 ## Обновление кода
 
+Одной командой (от root):
+
 ```bash
-cd /opt/wb-notify-bot
-git pull
-.venv/bin/pip install -r requirements.txt
-systemctl restart wbnotify
+cd /opt/wb-notify-bot && git pull && bash deploy/update.sh
 ```
+
+`deploy/update.sh` доставит зависимости, обновит оба systemd-юнита и
+перезапустит оба процесса. `.env` и `data/wbnotify.db` он не трогает.
+
+## Если не пускает по SSH
+
+Симптом: `ssh root@IP` висит и отваливается по таймауту, при этом сервер живой
+(порты 80/443 отвечают). Значит, пакеты на 22-й порт дропаются — обычно это
+файрвол Timeweb или `fail2ban`, забанивший ваш IP после серии неудачных
+попыток подключения.
+
+Что делать: зайти в панели Timeweb в **консоль сервера** (VNC), там
+авторизоваться (`login:` — `root`, пароль из панели) и уже в ней выполнить
+команду обновления. Пароль при вводе не отображается — это нормально.
+Многострочные вставки в VNC-консоль часто ломаются, поэтому команда выше —
+однострочная.
+
+Разбанить свой IP изнутри: `fail2ban-client set sshd unbanip ВАШ_IP`.
 
 ## Резервная копия
 
@@ -162,8 +183,8 @@ sqlite3 /opt/wb-notify-bot/data/wbnotify.db ".backup '/root/wbnotify-$(date +%F)
 ## Что проверить, если уведомления не приходят
 
 ```bash
-systemctl status wbnotify              # процесс жив?
-journalctl -u wbnotify --since "1 hour ago" | grep -i error
+systemctl status wbnotify wbnotify-bot   # процессы живы?
+journalctl -u wbnotify -u wbnotify-bot --since "1 hour ago" | grep -i error
 sqlite3 data/wbnotify.db "SELECT id, name, token_status, notify_from FROM shops;"
 ```
 

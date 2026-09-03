@@ -102,3 +102,67 @@ async def test_all_photos_broken_falls_back_to_text_only(monkeypatch):
     bot = FakeBot()
     await send_notification(bot, 123, "caption text", photo_urls=urls)
     assert bot.calls == [("send_message", "caption text")]
+
+
+def _jpeg(size: tuple[int, int]) -> bytes:
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", size, "white").save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def test_resize_photo_shrinks_to_450x600_keeping_aspect():
+    """Исходник WB — 900x1200 (3:4), уменьшаем ровно вчетверо, аспект сохраняем."""
+    import io
+
+    from PIL import Image
+
+    out = sender._resize_photo(_jpeg((900, 1200)))
+    assert Image.open(io.BytesIO(out)).size == (450, 600)
+
+
+def test_resize_photo_returns_original_on_broken_bytes():
+    """Битое фото не должно ронять отправку — деградируем до исходных байт."""
+    assert sender._resize_photo(b"not-an-image") == b"not-an-image"
+
+
+def test_render_takes_three_photos_from_card(conn):
+    """В карусель уходят первые 3 фото карточки, а не одно."""
+    import json
+
+    from wbnotify import shops_repo
+    from wbnotify.db import utcnow
+    from wbnotify.counters import now_msk
+
+    now = utcnow()
+    today = now_msk().date().isoformat()
+    shop_id = conn.execute(
+        "INSERT INTO shops (owner_user_id, telegram_chat_id, name, wb_api_token_encrypted,"
+        " token_status, is_active, created_at, updated_at)"
+        " VALUES (1, 555, 'test', X'00', 'active', 1, ?, ?)",
+        (now, now),
+    ).lastrowid
+    conn.execute(
+        "INSERT INTO cards_cache (shop_id, nm_id, photo_url, photos_json, refreshed_at)"
+        " VALUES (?, 111, 'http://x/main.jpg', ?, ?)",
+        (shop_id, json.dumps(["http://x/1.jpg", "http://x/2.jpg", "http://x/3.jpg"]), now),
+    )
+    conn.execute(
+        "INSERT INTO orders (shop_id, srid, date, last_change_date, nm_id, tech_size, raw_json)"
+        " VALUES (?, 'srid-1', ?, ?, 111, '42', '{}')",
+        (shop_id, f"{today}T10:00:00", f"{today}T10:00:00"),
+    )
+    ref_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        "INSERT INTO notification_queue (shop_id, event_type, ref_table, ref_id, daily_seq,"
+        " event_date, status, created_at) VALUES (?, 'order', 'orders', ?, 1, ?, 'pending', ?)",
+        (shop_id, ref_id, f"{today}T10:00:00", now),
+    )
+    conn.commit()
+
+    queue_row = conn.execute("SELECT * FROM notification_queue").fetchone()
+    _, photo_urls = sender._render(conn, shops_repo.get_shop(conn, shop_id), queue_row)
+    assert photo_urls == ["http://x/1.jpg", "http://x/2.jpg", "http://x/3.jpg"]

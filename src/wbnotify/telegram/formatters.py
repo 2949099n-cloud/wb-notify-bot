@@ -49,10 +49,6 @@ def _esc(value: object) -> str:
 # источник значения (решение пользователя, см. CLAUDE.md).
 _IL_DISABLED_VALUE = "0"
 
-# Окна для оценки «на сколько хватит» в «Остатках подробно» — три сразу
-# (решение пользователя), а не одно дефолтное, как в блоке уведомления.
-STOCK_WINDOWS = (7, 30, 60)
-
 
 def _fmt_money(value: float | None) -> str:
     if value is None:
@@ -221,12 +217,13 @@ def _rating_line(conn: sqlite3.Connection, shop_id: int, nm_id: int) -> tuple[st
 
 
 # На сколько дней хватит остатка: в «Заказ»/«Отмена» считаем по заказам,
-# в «Выкуп»/«Возврат» — по продажам (решение пользователя).
+# в «Выкуп»/«Возврат» — по продажам (решение пользователя). Сама база в строке
+# НЕ подписывается — пользователь просил убрать пометку «(по заказам)».
 _STOCK_BASIS_BY_EVENT_TYPE = {
-    "order": ("orders", "по заказам"),
-    "cancel": ("orders", "по заказам"),
-    "buyout": ("sales", "по продажам"),
-    "return": ("sales", "по продажам"),
+    "order": "orders",
+    "cancel": "orders",
+    "buyout": "sales",
+    "return": "sales",
 }
 
 
@@ -240,7 +237,7 @@ def _stock_lines(
     if card is None or not card["sizes_json"]:
         return f"   {PLACEHOLDER}"
 
-    basis, basis_label = _STOCK_BASIS_BY_EVENT_TYPE.get(event_type, _STOCK_BASIS_BY_EVENT_TYPE["order"])
+    basis = _STOCK_BASIS_BY_EVENT_TYPE.get(event_type, "orders")
     lines = []
     for size in json.loads(card["sizes_json"]):
         tech_size = size.get("techSize")
@@ -259,7 +256,7 @@ def _stock_lines(
                 else:
                     wb_qty = row["qty"]
         eta = stock_days_aggregate(conn, shop_id, nm_id, tech_size, window_days=7, basis=basis)
-        lines.append(f"   {tech_size} ({wb_qty}шт+{seller_qty}шт) ≈ на {eta} дн. ({basis_label})")
+        lines.append(f"   {tech_size} ({wb_qty}шт+{seller_qty}шт) ≈ на {eta} дн.")
     return "\n".join(lines)
 
 
@@ -300,10 +297,7 @@ def format_stocks_detail(conn: sqlite3.Connection, shop_id: int, nm_id: int) -> 
             lines.append("")
             continue
 
-        etas = "/".join(
-            stock_days_aggregate(conn, shop_id, nm_id, tech_size, window_days=w) for w in STOCK_WINDOWS
-        )
-        lines.append(f"🔪 Размер {_esc(tech_size)} ({total} шт ≈ {etas} дн. за {'/'.join(map(str, STOCK_WINDOWS))} дн.):")
+        lines.append(f"🔪 Размер {_esc(tech_size)} ({total} шт):")
         for row in rows:
             name = "Склады WB" if row["warehouse_kind"] == "wb" else _esc(row["warehouse_name"] or "склад продавца")
             lines.append(f"   • {name}: {row['qty']} шт.")

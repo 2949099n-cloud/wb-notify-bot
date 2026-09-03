@@ -1,13 +1,11 @@
-"""Доставка уведомлений: фото + подпись, fallback на отдельное текстовое
-сообщение при подписи >1024 символов (лимит caption у Telegram Bot API).
+"""Доставка уведомлений: карусель из 3 фото + подпись, fallback на отдельное
+текстовое сообщение при подписи >1024 символов (лимит caption у Telegram Bot API).
 
-**Одно фото, а не карусель** — решение пользователя после серии живых тестов:
-Telegram упорно рендерил первое фото альбома отдельным крупным блоком, а
-остальные — компактным рядом, независимо от аспекта (3:4 и 1:1), разрешения и
-наличия подписи. Уменьшение фото до 160px дало размытие без изменения раскладки.
-Вывод: раскладкой альбома управляет клиент Telegram, а не мы. Поэтому шлём одно
-главное фото карточки в оригинальном качестве. `cards_cache.photos_json`
-(первые 3 фото) сохранён на случай возврата к карусели.
+История с фото (чтобы не ходить по кругу): пробовали квадратный кроп 1:1 и
+уменьшение до 480px и 160px — Telegram всё равно рендерил первое фото альбома
+отдельным крупным блоком, а на 160px картинка ещё и мылила. Текущий вариант по
+решению пользователя: три первых фото карточки, уменьшенные вчетверо до 450x600
+(исходник WB — 900x1200, аспект 3:4 сохраняется).
 
 Фото передаются в Telegram БАЙТАМИ, а не URL. Проверено вживую: при передаче
 голого URL Telegram иногда отвечает "Failed to get http url content" на
@@ -18,18 +16,21 @@ Telegram упорно рендерил первое фото альбома от
 """
 from __future__ import annotations
 
+import io
 import json
 import logging
 import sqlite3
 from datetime import timedelta
 
 import httpx
+from PIL import Image
 from telegram import Bot, InputMediaPhoto
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 
 from wbnotify.counters import now_msk
 from wbnotify.db import utcnow
+from wbnotify.sync.cards_sync import CAROUSEL_PHOTOS
 from wbnotify.models import ShopRow
 from wbnotify.telegram.keyboards import notification_keyboard
 from wbnotify.telegram.formatters import (
@@ -70,14 +71,32 @@ async def _download_photo(url: str) -> bytes | None:
     return None
 
 
+# Целевой размер фото карусели: 450x600 — ровно вчетверо меньше исходных
+# 900x1200 от WB, аспект 3:4 сохраняется (решение пользователя). Меньше делать
+# нельзя: на 160px Telegram растягивал картинку обратно и она мылила.
+PHOTO_TARGET_SIZE = (450, 600)
+
+
+def _resize_photo(data: bytes) -> bytes:
+    """Уменьшает фото до PHOTO_TARGET_SIZE с сохранением пропорций. При любой
+    ошибке обработки возвращает исходник — уведомление важнее картинки."""
+    try:
+        image = Image.open(io.BytesIO(data)).convert("RGB")
+        image.thumbnail(PHOTO_TARGET_SIZE, Image.LANCZOS)
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+    except Exception as exc:  # noqa: BLE001 — деградация до оригинала, не фатально
+        logger.warning("Не удалось уменьшить фото: %s", exc)
+        return data
+
+
 async def _download_photos(urls: list[str]) -> list[bytes]:
-    """Фото отправляются в оригинальном качестве, без пережатия: уменьшение
-    (пробовали 480px и 160px) давало размытие и не влияло на раскладку в чате."""
     photos = []
     for url in urls:
         data = await _download_photo(url)
         if data is not None:
-            photos.append(data)
+            photos.append(_resize_photo(data))
     return photos
 
 
@@ -129,10 +148,9 @@ def _render(conn: sqlite3.Connection, shop: ShopRow, queue_row: sqlite3.Row) -> 
         "SELECT photo_url, photos_json FROM cards_cache WHERE shop_id = ? AND nm_id = ?",
         (shop.id, ref_row["nm_id"]),
     ).fetchone()
-    # Только ГЛАВНОЕ фото карточки (решение пользователя, см. docstring модуля).
-    # photos_json хранит первые 3 — берём из него первое, чтобы источник был один.
+    # Три первых фото карточки — карусель (см. docstring модуля).
     if card and card["photos_json"]:
-        photo_urls = json.loads(card["photos_json"])[:1]
+        photo_urls = json.loads(card["photos_json"])[:CAROUSEL_PHOTOS]
     elif card and card["photo_url"]:
         photo_urls = [card["photo_url"]]
     else:

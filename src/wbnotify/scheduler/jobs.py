@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 DRAIN_LIMIT_PER_CYCLE = 30
 
 
+def _has_cards(conn, shop_id: int) -> bool:
+    return bool(
+        conn.execute("SELECT 1 FROM cards_cache WHERE shop_id = ? LIMIT 1", (shop_id,)).fetchone()
+    )
+
+
 async def poll_and_notify(config: Config) -> None:
     """Основной цикл: свежие данные -> детект событий -> отправка уведомлений."""
     bot = make_bot(config.telegram_bot_token)
@@ -41,6 +47,14 @@ async def poll_and_notify(config: Config) -> None:
 
         for shop in shops:
             try:
+                # Только что подключённый магазин (через /addshop или CLI) ещё не
+                # имеет карточек: они синкаются раз в сутки. Без них уведомление
+                # уйдёт без названия товара, фото, артикула и остатков — поэтому
+                # первый раз догоняем суточные шаги сразу, не дожидаясь ночи.
+                if not _has_cards(conn, shop.id):
+                    logger.info("shop_id=%s: карточек нет — первичный суточный синк", shop.id)
+                    await sync_shop_daily(conn, shop, config.token_encryption_key)
+
                 result = await sync_shop_frequent(conn, shop, config.token_encryption_key)
                 if result["error"]:
                     logger.warning("shop_id=%s: синк с ошибкой (%s), уведомления пропускаю", shop.id, result["error"])

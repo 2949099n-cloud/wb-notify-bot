@@ -68,11 +68,18 @@ def order_velocity(
 ) -> float:
     """Скорость заказов (шт/день) за window_days ДО asof (не считая будущего
     относительно asof). Считаем ВСЕ заказы, включая впоследствии отменённые —
-    это сигнал спроса, а не фактических отгрузок."""
+    это сигнал спроса, а не фактических отгрузок.
+
+    Считается ПО АРТИКУЛУ ЦЕЛИКОМ, без разбивки по размерам (решение
+    пользователя): у одного артикула размеров пять-шесть, спрос по каждому в
+    отдельности близок к нулю, и цифра выглядела абсурдно заниженной. `tech_size`
+    в сигнатуре оставлен, чтобы вызов совпадал с соседними метриками блока,
+    но в запросе НЕ участвует.
+    """
     cutoff, upper = _window_bounds(window_days, asof)
     count = conn.execute(
-        "SELECT COUNT(*) FROM orders WHERE shop_id=? AND nm_id=? AND tech_size=? AND date >= ? AND date < ?",
-        (shop_id, nm_id, tech_size, cutoff, upper),
+        "SELECT COUNT(*) FROM orders WHERE shop_id=? AND nm_id=? AND date >= ? AND date < ?",
+        (shop_id, nm_id, cutoff, upper),
     ).fetchone()[0]
     return velocity(count, window_days)
 

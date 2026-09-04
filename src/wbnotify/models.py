@@ -19,6 +19,7 @@ class ShopRow:
     subscription_status: str
     subscription_expires_at: str | None
     is_active: bool
+    created_at: str
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "ShopRow":
@@ -32,4 +33,5 @@ class ShopRow:
             subscription_status=row["subscription_status"],
             subscription_expires_at=row["subscription_expires_at"],
             is_active=bool(row["is_active"]),
+            created_at=row["created_at"],
         )

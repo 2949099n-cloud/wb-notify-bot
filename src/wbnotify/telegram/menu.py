@@ -114,7 +114,7 @@ def shop_menu(conn: sqlite3.Connection, shop_id: int, user_id: int) -> tuple[str
     if role == "owner":
         rows += [
             [InlineKeyboardButton("👥 Команда", callback_data=cb("team", shop_id))],
-            [InlineKeyboardButton("💳 Подписка", callback_data=cb("sub", shop_id))],
+            [InlineKeyboardButton("💳 Подписка", callback_data=cb("subfree", shop_id))],
             [InlineKeyboardButton("⚙️ Управление кабинетом", callback_data=cb("manage", shop_id))],
         ]
     rows.append([InlineKeyboardButton("‹ Назад", callback_data=cb("main"))])
@@ -167,8 +167,29 @@ def tokens_screen(conn: sqlite3.Connection, shop_id: int, user_id: int, config: 
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
 
-def token_warning_screen(shop_id: int, bot_name: str):
-    text = (
+# Шаги создания токена в личном кабинете WB — одни и те же при подключении
+# кабинета и при замене токена, поэтому вынесены, чтобы тексты не разъезжались.
+_TOKEN_STEPS = (
+    "<b>1.</b> Откройте «Доступ к API» в кабинете WB. Создавать токены может только владелец.\n\n"
+    "<b>2.</b> Нажмите «Создать токен» и заполните:\n"
+    "• Имя — на ваш выбор\n"
+    "• Тип — <b>Персональный</b>\n"
+    "• Только чтение — <b>включить</b>\n"
+    "• Срок — <b>180 дней</b>\n\n"
+    "<b>Категории доступа.</b> Обязательны эти три:\n"
+    "✅ <b>Статистика</b> — продажи, заказы, остатки\n"
+    "✅ <b>Контент</b> — названия и характеристики товаров\n"
+    "✅ <b>Аналитика</b> — финрезультаты и комиссии\n\n"
+    "Остальные категории отметьте для полной картины (финансы, реклама, отзывы, цены, "
+    "поставки и др.). Не отмечайте только ❌ <b>Пользователи</b> — она боту не нужна.\n\n"
+    "⚠️ Токен покажут <b>один раз</b> — копируйте сразу.\n\n"
+    "<b>3.</b> Пришлите его сюда одним сообщением. Длинная строка, начинается с eyJ.\n"
+    "Сообщение с токеном я удалю из чата сразу после обработки."
+)
+
+
+def _token_warning_text(bot_name: str) -> str:
+    return (
         f"🔐 <b>Прежде чем начать</b>\n{RULE}\n\n"
         "<b>Зачем нужен токен?</b>\n"
         f"Токен — это ключ доступа к вашему кабинету WB. Он нужен, чтобы {_esc(bot_name)} мог "
@@ -183,10 +204,54 @@ def token_warning_screen(shop_id: int, bot_name: str):
         "❌ не создаёт поставки и заказы\n"
         "❌ не трогает карточки товаров"
     )
+
+
+def token_warning_screen(shop_id: int, bot_name: str):
+    """Памятка перед ЗАМЕНОЙ токена уже подключённого кабинета."""
     keyboard = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("✅ Понятно, продолжить", callback_data=cb("tokrep2", shop_id))],
             [InlineKeyboardButton("❌ Отмена", callback_data=cb("tok", shop_id))],
+        ]
+    )
+    return _token_warning_text(bot_name), keyboard
+
+
+def add_warning_screen(bot_name: str):
+    """Та же памятка, но ведёт в ПОДКЛЮЧЕНИЕ нового кабинета."""
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Понятно, продолжить", callback_data=cb("addtok"))],
+            [InlineKeyboardButton("❌ Отмена", callback_data=cb("main"))],
+        ]
+    )
+    return _token_warning_text(bot_name), keyboard
+
+
+def add_instructions_screen():
+    text = (
+        f"🔑 <b>Добавление WB-токена</b>\n{RULE}\n"
+        "Токен — это <b>не пароль</b>. Он только читает данные кабинета, ничего не меняет.\n\n"
+        f"{_TOKEN_STEPS}"
+    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=cb("main"))]])
+    return text, keyboard
+
+
+def delete_account_screen():
+    text = (
+        f"⚠️ <b>Удаление аккаунта</b>\n{RULE}\n"
+        "Будут удалены ваше имя, доступ ко всем кабинетам и подключённые вами кабинеты — "
+        "опрос WB по ним прекратится, уведомления перестанут приходить, команда потеряет доступ.\n\n"
+        "История заказов и продаж останется в базе.\n"
+        "<i>Действие необратимо. Подтвердите или отмените.</i>"
+    )
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("❌ Отмена", callback_data=cb("profile")),
+                InlineKeyboardButton("⚠️ Подтвердить", callback_data=cb("delaccok")),
+            ]
         ]
     )
     return text, keyboard
@@ -195,21 +260,8 @@ def token_warning_screen(shop_id: int, bot_name: str):
 def token_instructions_screen(shop_id: int):
     text = (
         f"🔁 <b>Замена WB-токена</b>\n{RULE}\n"
-        "Старый токен будет отозван автоматически после успешной валидации нового.\n\n"
-        "<b>1.</b> Откройте «Доступ к API» в кабинете WB. Создавать токены может только владелец.\n\n"
-        "<b>2.</b> Нажмите «Создать токен» и заполните:\n"
-        "• Имя — на ваш выбор\n"
-        "• Тип — <b>Персональный</b>\n"
-        "• Только чтение — <b>включить</b>\n"
-        "• Срок — <b>180 дней</b>\n\n"
-        "<b>Категории доступа.</b> Обязательны эти три:\n"
-        "✅ <b>Статистика</b> — продажи, заказы, остатки\n"
-        "✅ <b>Контент</b> — названия и характеристики товаров\n"
-        "✅ <b>Аналитика</b> — финрезультаты и комиссии\n\n"
-        "Остальные категории отметьте для полной картины (финансы, реклама, отзывы, цены, "
-        "поставки и др.). Не отмечайте только ❌ <b>Пользователи</b> — она боту не нужна.\n\n"
-        "⚠️ Токен покажут <b>один раз</b> — копируйте сразу.\n\n"
-        "<b>3.</b> Пришлите его сюда. Длинная строка, начинается с eyJ."
+        "Старый токен будет отозван автоматически после успешной проверки нового.\n\n"
+        f"{_TOKEN_STEPS}"
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=cb("tok", shop_id))]])
     return text, keyboard
@@ -256,7 +308,7 @@ def team_screen(conn: sqlite3.Connection, shop_id: int, user_id: int):
             rows.append(
                 [
                     InlineKeyboardButton(
-                        f"🧑 {member['name']} — {title}",
+                        f"💼 {member['name']} — {title}",
                         callback_data=cb("mem", shop_id, member["telegram_user_id"]),
                     )
                 ]
@@ -268,7 +320,7 @@ def team_screen(conn: sqlite3.Connection, shop_id: int, user_id: int):
 
 def member_screen(conn: sqlite3.Connection, shop_id: int, member_id: int):
     name = members_repo.display_name(conn, member_id)
-    text = f"🧑 <b>{_esc(name)}</b>\n{RULE}\nРоль: <b>Менеджер</b>\nПолучает уведомления по этому кабинету."
+    text = f"💼 <b>{_esc(name)}</b>\n{RULE}\nРоль: <b>Менеджер</b>\nПолучает уведомления по этому кабинету."
     keyboard = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("🗑 Удалить из кабинета", callback_data=cb("memdel", shop_id, member_id))],
@@ -368,6 +420,7 @@ def profile_screen(conn: sqlite3.Connection, user_id: int, chat_id: int):
     keyboard = InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("✏️ Сменить имя", callback_data=cb("rename"))],
+            [InlineKeyboardButton("🗑 Удалить аккаунт", callback_data=cb("delacc"))],
             [InlineKeyboardButton("‹ Назад", callback_data=cb("main"))],
         ]
     )
@@ -491,6 +544,20 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         elif action == "inv":
             await _show(query, *invite_screen(conn, shop_id, user_id, context.bot_data["bot_username"]))
+
+        elif action == "subfree":
+            await ack("Подписка сейчас бесплатная — платить ничего не нужно.", alert=True)
+
+        elif action == "addshop":
+            await _show(query, *add_warning_screen(_bot_name(context)))
+
+        elif action == "delacc":
+            await _show(query, *delete_account_screen())
+
+        elif action == "delaccok":
+            members_repo.delete_account(conn, user_id)
+            await _show(query, *main_menu(conn, user_id))
+            await ack("Аккаунт удалён.", alert=True)
 
         elif action == "sub":
             await _show(query, *subscription_screen(conn, shop_id))

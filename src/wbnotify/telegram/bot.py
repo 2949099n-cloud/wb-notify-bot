@@ -93,21 +93,20 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ── Подключение кабинета ──────────────────────────────────────────────────────
 
 
-ADDSHOP_PROMPT = (
-    "Пришлите ваш WB API-токен (личный кабинет WB: Профиль → Настройки → Доступ к API, "
-    "нужен как минимум доступ к категориям «Статистика», «Контент» и «Аналитика»).\n\n"
-    "Сообщение с токеном будет удалено сразу после обработки — не переживайте, что он "
-    "останется в переписке. /cancel — чтобы отменить."
-)
-
-
 async def addshop_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Экран с инструкцией и ожидание токена.
+
+    Из меню сюда ведёт кнопка «Понятно, продолжить» на памятке (`m|addtok`),
+    из команды /addshop — сразу, памятку в этом случае показывать негде.
+    """
     _remember_user(context, update)
+    text, keyboard = menu.add_instructions_screen()
+
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.message.reply_text(ADDSHOP_PROMPT)
+        await update.callback_query.edit_message_text(text, parse_mode=PARSE_MODE, reply_markup=keyboard)
     else:
-        await update.message.reply_text(ADDSHOP_PROMPT)
+        await update.message.reply_text(text, parse_mode=PARSE_MODE, reply_markup=keyboard)
     return AWAITING_TOKEN
 
 
@@ -334,10 +333,17 @@ def build_application(config: Config) -> Application:
         ConversationHandler(
             entry_points=[
                 CommandHandler("addshop", addshop_start),
-                CallbackQueryHandler(addshop_start, pattern=r"^m\|addshop$"),
+                # Памятку «Прежде чем начать» рисует меню, сюда ведёт её кнопка
+                # «Понятно, продолжить».
+                CallbackQueryHandler(addshop_start, pattern=r"^m\|addtok$"),
             ],
             states={AWAITING_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, addshop_receive_token)]},
-            fallbacks=[CommandHandler("cancel", cancel)],
+            fallbacks=[
+                CommandHandler("cancel", cancel),
+                # «Отмена» возвращает в главное меню — диалог обязан завершиться,
+                # иначе следующее сообщение уйдёт в него как токен.
+                CallbackQueryHandler(on_button, pattern=r"^m\|main$"),
+            ],
         )
     )
     app.add_handler(

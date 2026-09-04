@@ -51,6 +51,7 @@ async def test_token_message_always_deleted(tmp_path, monkeypatch, outcome):
         fake_shop = ShopRow(
             id=1, owner_user_id=777, telegram_chat_id=555, name="Тест", brand_code=None,
             token_status="active", subscription_status="active", subscription_expires_at=None, is_active=True,
+            created_at="2026-05-08T12:00:00+00:00",
         )
 
         async def fake_register_shop(conn, owner_user_id, chat_id, raw_token, enc_key):

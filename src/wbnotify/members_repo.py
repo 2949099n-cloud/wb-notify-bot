@@ -112,6 +112,32 @@ def remove_member(conn: sqlite3.Connection, shop_id: int, user_id: int) -> None:
     conn.commit()
 
 
+def delete_account(conn: sqlite3.Connection, user_id: int) -> None:
+    """Удаляет пользователя: его кабинеты отключаются, доступы снимаются.
+
+    Кабинеты, где пользователь был владельцем, деактивируются — иначе они
+    остались бы в опросе WB без единого получателя уведомлений. Кабинеты, куда
+    его лишь приглашали, продолжают работать у владельца.
+
+    Строки `shops` не удаляем физически: на них ссылаются orders/sales/очередь.
+    Здесь же поднимается флаг is_active — тот же механизм, что и в
+    shops_repo.deactivate_shop (импортировать его нельзя: shops_repo сам зависит
+    от этого модуля).
+    """
+    owned = conn.execute(
+        "SELECT shop_id FROM shop_members WHERE telegram_user_id = ? AND role = 'owner'", (user_id,)
+    ).fetchall()
+    for row in owned:
+        conn.execute(
+            "UPDATE shops SET is_active = 0, updated_at = ? WHERE id = ?", (utcnow(), row["shop_id"])
+        )
+        conn.execute("DELETE FROM shop_members WHERE shop_id = ?", (row["shop_id"],))
+
+    conn.execute("DELETE FROM shop_members WHERE telegram_user_id = ?", (user_id,))
+    conn.execute("DELETE FROM bot_users WHERE telegram_user_id = ?", (user_id,))
+    conn.commit()
+
+
 def create_invite(conn: sqlite3.Connection, shop_id: int, created_by: int) -> tuple[str, datetime]:
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=INVITE_TTL_DAYS)

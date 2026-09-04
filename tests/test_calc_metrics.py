@@ -271,3 +271,27 @@ def test_stock_days_by_warehouse_per_warehouse_breakdown(conn):
     assert by_name["Склад А"]["eta_by_window"][7] == stock_eta(20, velocity(2, 7))
     assert by_name["Склад Б"]["quantity"] == 5
     assert by_name["Склад Б"]["eta_by_window"][7] == "∞"  # ни одного заказа с этого склада
+
+
+def test_order_velocity_counts_whole_article_not_one_size(conn):
+    """Скорость заказов считается по артикулу целиком (решение пользователя).
+
+    Раньше фильтровали ещё и по размеру: у артикула их пять-шесть, спрос по
+    каждому в отдельности близок к нулю, и цифра выглядела абсурдно заниженной.
+    """
+    from wbnotify.calc.metrics import order_velocity
+
+    _insert_shop(conn)
+    shop_id = SHOP_ID
+    for index, size in enumerate(["38", "39", "40", "38", "39", "38", "40"]):
+        conn.execute(
+            "INSERT INTO orders (shop_id, srid, date, last_change_date, nm_id, tech_size, raw_json)"
+            " VALUES (?, ?, '2026-09-02T10:00:00', '2026-09-02T10:00:00', 555, ?, '{}')",
+            (shop_id, f"srid-{index}", size),
+        )
+    conn.commit()
+
+    asof = "2026-09-03T00:00:00"
+    # 7 заказов по артикулу за 7 дней = 1.0 шт/день, независимо от размера в кнопке
+    assert order_velocity(conn, shop_id, 555, "40", 7, asof) == 1.0
+    assert order_velocity(conn, shop_id, 555, "38", 7, asof) == 1.0

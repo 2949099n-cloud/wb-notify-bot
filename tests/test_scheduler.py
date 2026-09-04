@@ -178,10 +178,10 @@ async def test_backlog_after_outage_is_sent_oldest_first(conn):
 
 
 def test_scheduler_jobs_are_configured():
-    """Оба расписания заведены и защищены от наслаивания прогонов."""
+    """Все расписания заведены и защищены от наслаивания прогонов."""
     scheduler = build_scheduler(_make_config())
     jobs = {job.id: job for job in scheduler.get_jobs()}
-    assert set(jobs) == {"poll_and_notify", "daily_refresh"}
+    assert set(jobs) == {"poll_and_notify", "daily_refresh", "daily_summary"}
     for job in jobs.values():
         assert job.max_instances == 1, "параллельные прогоны одного задания недопустимы"
         assert job.coalesce is True, "пропущенные срабатывания должны схлопываться"

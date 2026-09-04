@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -24,6 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from wbnotify import shops_repo
 from wbnotify.config import ConfigError, load_config
+from wbnotify.counters import now_msk
 from wbnotify.db import db_session, utcnow
 from wbnotify.logging_conf import setup_logging
 from wbnotify.telegram.sender import drain_queue_for_shop, make_bot
@@ -65,6 +67,25 @@ def cmd_start_notifying(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_summary(args) -> int:
+    """Отправить сводку за конкретный день прямо сейчас — чтобы посмотреть, как
+    она выглядит, не дожидаясь утренней рассылки."""
+    from wbnotify.telegram.daily_summary import build_summary, send_for_shop
+
+    config = load_config()
+    date_str = args.date or (now_msk().date() - timedelta(days=1)).isoformat()
+
+    with db_session(config.db_path) as conn:
+        shop = shops_repo.get_shop(conn, args.shop_id)
+        if args.dry_run:
+            print(build_summary(conn, shop, date_str))
+            return 0
+        bot = make_bot(config.telegram_bot_token)
+        sent = asyncio.run(send_for_shop(conn, bot, shop, date_str))
+    print(f"Сводка за {date_str} отправлена в {sent} чат(ов) кабинета «{shop.name}»")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -81,6 +102,14 @@ def main() -> int:
     )
     p_start.add_argument("--shop-id", type=int, required=True)
     p_start.set_defaults(func=cmd_start_notifying)
+
+    p_summary = sub.add_parser("summary", help="Отправить сводку за день (по умолчанию за вчера)")
+    p_summary.add_argument("--shop-id", type=int, required=True)
+    p_summary.add_argument("--date", help="День в МСК, ГГГГ-ММ-ДД. По умолчанию вчера")
+    p_summary.add_argument(
+        "--dry-run", action="store_true", help="Только показать текст в консоли, никому не отправлять"
+    )
+    p_summary.set_defaults(func=cmd_summary)
 
     args = parser.parse_args()
     try:

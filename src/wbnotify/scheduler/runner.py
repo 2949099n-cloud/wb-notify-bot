@@ -20,7 +20,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from wbnotify.config import Config, load_config
 from wbnotify.db import init_db
 from wbnotify.logging_conf import setup_logging
-from wbnotify.scheduler.jobs import daily_refresh, full_sync_once, poll_and_notify
+from wbnotify.scheduler.jobs import daily_refresh, daily_summary_job, full_sync_once, poll_and_notify
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,15 @@ def build_scheduler(config: Config) -> AsyncIOScheduler:
         coalesce=True,
         max_instances=1,
         misfire_grace_time=300,
+    )
+    scheduler.add_job(
+        daily_summary_job,
+        trigger=CronTrigger(hour=config.daily_summary_hour_msk, minute=0),
+        args=[config],
+        id="daily_summary",
+        name="Утренняя сводка за прошедший день",
+        coalesce=True,
+        max_instances=1,
     )
     scheduler.add_job(
         daily_refresh,

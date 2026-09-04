@@ -14,11 +14,13 @@ import logging
 
 from telegram.error import TelegramError
 
-from wbnotify import shops_repo
+from datetime import timedelta
+
+from wbnotify import admin_alerts, shops_repo
 from wbnotify.config import Config
-from wbnotify import admin_alerts
-from wbnotify.telegram import admin_notifier
+from wbnotify.counters import now_msk
 from wbnotify.db import db_session, utcnow
+from wbnotify.telegram import admin_notifier
 from wbnotify.events.classify import classify_shop_events
 from wbnotify.sync import sync_all_active_shops, sync_shop_daily, sync_shop_frequent
 from wbnotify.sync.tariffs_sync import sync_tariffs
@@ -122,6 +124,22 @@ def _start_notifying(conn, shop_id: int) -> None:
     conn.execute("UPDATE shops SET notify_from = ?, updated_at = ? WHERE id = ?", (now, now, shop_id))
     conn.commit()
     logger.info("shop_id=%s: первичный синк завершён — рассылка включена с %s", shop_id, now)
+
+
+async def daily_summary_job(config: Config) -> None:
+    """Утренняя сводка за прошедший день — по одному закреплённому сообщению
+    в каждом чате каждого кабинета."""
+    from wbnotify.telegram import daily_summary
+
+    yesterday = (now_msk().date() - timedelta(days=1)).isoformat()
+    bot = make_bot(config.telegram_bot_token)
+    with db_session(config.db_path) as conn:
+        for shop in shops_repo.list_active_shops(conn):
+            try:
+                sent = await daily_summary.send_for_shop(conn, bot, shop, yesterday)
+                logger.info("shop_id=%s: сводка за %s отправлена в %d чат(ов)", shop.id, yesterday, sent)
+            except Exception:  # noqa: BLE001 — один магазин не должен ронять рассылку остальных
+                logger.exception("shop_id=%s: не удалось отправить сводку", shop.id)
 
 
 async def daily_refresh(config: Config) -> None:

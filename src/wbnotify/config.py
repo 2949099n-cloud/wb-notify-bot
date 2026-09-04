@@ -30,6 +30,8 @@ class Config:
     # заказов в основном боте (при сотне кабинетов она станет нечитаемой).
     # Не задан — админская часть работает в основном боте, как раньше.
     telegram_admin_bot_token: str | None = None
+    # Час утренней рассылки сводки за прошедший день (МСК).
+    daily_summary_hour_msk: int = 9
 
 
 def _require(env: dict, key: str) -> str:
@@ -56,6 +58,9 @@ def load_config(env_file: str | None = None) -> Config:
         stocks_poll_interval_minutes=int(env.get("STOCKS_POLL_INTERVAL_MINUTES", "5")),
         cards_refresh_hour_msk=int(env.get("CARDS_REFRESH_HOUR_MSK", "3")),
         tariffs_refresh_hour_msk=int(env.get("TARIFFS_REFRESH_HOUR_MSK", "3")),
+        # Утро: сводка подводит итог ПРОШЕДШЕГО дня, к 9:00 данные за него уже
+        # досинкались (последний ночной цикл опроса проходит в 8:5x).
+        daily_summary_hour_msk=int(env.get("DAILY_SUMMARY_HOUR_MSK", "9")),
         db_path=env.get("DB_PATH", "./data/wbnotify.db"),
         timezone=env.get("TIMEZONE", "Europe/Moscow"),
         log_level=env.get("LOG_LEVEL", "INFO"),

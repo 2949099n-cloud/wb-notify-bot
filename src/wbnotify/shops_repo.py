@@ -100,6 +100,30 @@ async def replace_token(conn: sqlite3.Connection, shop_id: int, raw_token: str, 
     return get_shop(conn, shop_id)
 
 
+async def resume_token(conn: sqlite3.Connection, shop_id: int, enc_key: str) -> ShopRow:
+    """Возвращает кабинет в опрос, если сохранённый токен всё ещё рабочий.
+
+    Нужна после «Отозвать» (пользователь передумал) и после автоматической
+    пометки invalid по 401 — например, когда WB временно отвечал ошибкой.
+    Проверяем живым ping: если токен и правда мёртв, статус остаётся invalid.
+    """
+    raw_token = get_decrypted_token(conn, shop_id, enc_key)
+    try:
+        await ping(raw_token)
+    except WBAuthError as exc:
+        raise InvalidTokenError("Сохранённый токен недействителен — нужна замена") from exc
+    except WBError as exc:
+        raise InvalidTokenError(f"Не удалось проверить токен через WB API: {exc}") from exc
+
+    now = _now()
+    conn.execute(
+        "UPDATE shops SET token_status = 'active', token_checked_at = ?, updated_at = ? WHERE id = ?",
+        (now, now, shop_id),
+    )
+    conn.commit()
+    return get_shop(conn, shop_id)
+
+
 def revoke_token(conn: sqlite3.Connection, shop_id: int) -> None:
     """Помечает токен недействительным на нашей стороне: опрос кабинета
     останавливается (is_shop_active), уведомления перестают приходить.

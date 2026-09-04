@@ -31,6 +31,10 @@ from wbnotify.telegram.formatters import PARSE_MODE, _esc
 logger = logging.getLogger(__name__)
 
 PREFIX = "m"
+# Флаг «чего ждём от пользователя» в user_data (см. telegram/bot.py). Меню его
+# ставит, обработчик текста разбирает. Любой другой переход по меню его снимает —
+# поэтому «зависнуть» в ожидании ввода нельзя.
+AWAIT_KEY = "awaiting_input"
 RULE = "━━━━━━━━━━━━━━━━━━━"
 
 # Тарифы показываются справочно: приём платежей не подключён (решение
@@ -137,8 +141,11 @@ def tokens_screen(conn: sqlite3.Connection, shop_id: int, user_id: int, config: 
     ]
 
     if shop.token_status != "active":
-        lines.append("🔴 Токен помечен недействительным — данные не обновляются.")
-        lines.append("Замените токен, чтобы уведомления пошли снова.")
+        lines.append("🔴 Токен помечен недействительным — опрос WB остановлен,")
+        lines.append("уведомления по этому кабинету не приходят.")
+        lines.append("")
+        lines.append("Если токен на самом деле рабочий (например, его отозвали по ошибке),")
+        lines.append("нажмите «Возобновить опрос» — я проверю его живым запросом к WB.")
     else:
         info = parse_token(shops_repo.get_decrypted_token(conn, shop_id, config.token_encryption_key))
         if info is None:
@@ -157,12 +164,16 @@ def tokens_screen(conn: sqlite3.Connection, shop_id: int, user_id: int, config: 
 
     rows = []
     if role == "owner":
-        rows.append(
-            [
-                InlineKeyboardButton("Заменить", callback_data=cb("tokrep", shop_id)),
-                InlineKeyboardButton("Отозвать", callback_data=cb("tokrev", shop_id)),
-            ]
-        )
+        if shop.token_status == "active":
+            rows.append(
+                [
+                    InlineKeyboardButton("Заменить", callback_data=cb("tokrep", shop_id)),
+                    InlineKeyboardButton("Отозвать", callback_data=cb("tokrev", shop_id)),
+                ]
+            )
+        else:
+            rows.append([InlineKeyboardButton("▶️ Возобновить опрос", callback_data=cb("tokon", shop_id))])
+            rows.append([InlineKeyboardButton("Заменить", callback_data=cb("tokrep", shop_id))])
     rows.append([InlineKeyboardButton("‹ Назад", callback_data=cb("shop", shop_id))])
     return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -235,6 +246,16 @@ def add_instructions_screen():
         f"{_TOKEN_STEPS}"
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=cb("main"))]])
+    return text, keyboard
+
+
+def rename_screen(conn: sqlite3.Connection, user_id: int):
+    text = (
+        f"✏️ <b>Смена имени</b>\n{RULE}\n"
+        f"<i>Сейчас:</i> <b>{_esc(members_repo.display_name(conn, user_id))}</b>\n\n"
+        "Пришлите новое имя одним сообщением."
+    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=cb("profile"))]])
     return text, keyboard
 
 
@@ -488,6 +509,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     shop_id = int(args[0]) if args and args[0].lstrip("-").isdigit() else None
 
+    # Переход по меню отменяет ожидание ввода: пользователь передумал присылать
+    # токен или имя. Ветки, которые ввод как раз запрашивают, ставят флаг заново.
+    context.user_data.pop(AWAIT_KEY, None)
+
     with db_session(config.db_path) as conn:
         # Изоляция: к кабинету допускаются только его участники. Проверяем ДО
         # любого действия, а не по факту — иначе чужой shop_id в callback_data
@@ -526,6 +551,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif action == "tokrev":
             await _show(query, *token_revoke_screen(conn, shop_id, config))
 
+        elif action == "tokon":
+            try:
+                await shops_repo.resume_token(conn, shop_id, config.token_encryption_key)
+            except shops_repo.InvalidTokenError as exc:
+                await ack(f"Не вышло: {exc}", alert=True)
+            else:
+                await ack("Опрос возобновлён, уведомления снова пойдут.", alert=True)
+            await _show(query, *tokens_screen(conn, shop_id, user_id, config))
+
         elif action == "tokrevok":
             shops_repo.revoke_token(conn, shop_id)
             await _show(query, *tokens_screen(conn, shop_id, user_id, config))
@@ -544,6 +578,18 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         elif action == "inv":
             await _show(query, *invite_screen(conn, shop_id, user_id, context.bot_data["bot_username"]))
+
+        elif action == "addtok":
+            context.user_data[AWAIT_KEY] = ("addshop", None)
+            await _show(query, *add_instructions_screen())
+
+        elif action == "tokrep2":
+            context.user_data[AWAIT_KEY] = ("replace_token", shop_id)
+            await _show(query, *token_instructions_screen(shop_id))
+
+        elif action == "rename":
+            context.user_data[AWAIT_KEY] = ("rename", None)
+            await _show(query, *rename_screen(conn, user_id))
 
         elif action == "subfree":
             await ack("Подписка сейчас бесплатная — платить ничего не нужно.", alert=True)

@@ -12,7 +12,7 @@ import pytest
 from wbnotify import shops_repo
 from wbnotify.config import Config
 from wbnotify.models import ShopRow
-from wbnotify.telegram.bot import addshop_receive_token
+from wbnotify.telegram.bot import AWAIT_KEY, on_text
 
 
 def _make_update_context(db_path: str, text: str):
@@ -35,7 +35,10 @@ def _make_update_context(db_path: str, text: str):
         effective_user=SimpleNamespace(id=777),
     )
     bot = SimpleNamespace(delete_message=AsyncMock(), send_message=AsyncMock())
-    context = SimpleNamespace(bot_data={"config": config}, bot=bot)
+    # Бот ждёт от пользователя токен нового кабинета — тот же флаг, что ставит меню.
+    context = SimpleNamespace(
+        bot_data={"config": config}, bot=bot, user_data={AWAIT_KEY: ("addshop", None)}
+    )
     return update, context
 
 
@@ -64,7 +67,7 @@ async def test_token_message_always_deleted(tmp_path, monkeypatch, outcome):
 
         monkeypatch.setattr(shops_repo, "register_shop", fake_register_shop_fail)
 
-    await addshop_receive_token(update, context)
+    await on_text(update, context)
 
     context.bot.delete_message.assert_awaited_once_with(chat_id=555, message_id=42)
     context.bot.send_message.assert_awaited_once()
@@ -73,3 +76,20 @@ async def test_token_message_always_deleted(tmp_path, monkeypatch, outcome):
         assert "Тест" in reply_text
     else:
         assert "Не удалось" in reply_text
+
+
+async def test_unexpected_text_is_not_treated_as_token(tmp_path):
+    """Без флага ожидания текст не уходит в регистрацию кабинета: иначе любое
+    случайное сообщение пыталось бы стать токеном."""
+    from wbnotify.db import init_db
+
+    db_path = str(tmp_path / "test.db")
+    init_db(db_path)
+    update, context = _make_update_context(db_path, text="привет")
+    context.user_data.clear()
+    update.message.reply_text = AsyncMock()
+
+    await on_text(update, context)
+
+    update.message.reply_text.assert_awaited_once()
+    context.bot.delete_message.assert_not_awaited()

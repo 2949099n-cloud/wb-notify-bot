@@ -18,7 +18,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
-    ConversationHandler,
     MessageHandler,
     filters,
 )
@@ -32,10 +31,6 @@ from wbnotify.telegram.formatters import PARSE_MODE, format_stocks_detail
 from wbnotify.telegram.keyboards import ACTION_APPEARANCE, ACTION_MUTE, ACTION_STOCKS, parse_callback
 
 logger = logging.getLogger(__name__)
-
-AWAITING_TOKEN = 1
-AWAITING_NEW_TOKEN = 2
-AWAITING_NAME = 3
 
 INVITE_PREFIX = "inv_"
 
@@ -90,24 +85,20 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(text, parse_mode=PARSE_MODE, reply_markup=keyboard)
 
 
-# ── Подключение кабинета ──────────────────────────────────────────────────────
+# ── Ввод текста: подключение кабинета, замена токена, переименование ──────────
+#
+# Раньше эти три сценария были на ConversationHandler, и пользователь получал
+# «Кнопка устарела» на кнопках «Сменить имя» и «Понятно, продолжить». Причина:
+# незавершённый диалог остаётся активным навсегда (таймаута не было), а пока он
+# активен, ConversationHandler проверяет только обработчики ТЕКУЩЕГО состояния —
+# и собственную точку входа больше не видит. Нажатие проваливалось в общий
+# обработчик меню, который такого действия не знает.
+#
+# Вместо диалогов — явный флаг «чего ждём от пользователя» в user_data. Он
+# сбрасывается при любом переходе по меню, поэтому «зависнуть» не может, а
+# логика видна в одном месте.
 
-
-async def addshop_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Экран с инструкцией и ожидание токена.
-
-    Из меню сюда ведёт кнопка «Понятно, продолжить» на памятке (`m|addtok`),
-    из команды /addshop — сразу, памятку в этом случае показывать негде.
-    """
-    _remember_user(context, update)
-    text, keyboard = menu.add_instructions_screen()
-
-    if update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, parse_mode=PARSE_MODE, reply_markup=keyboard)
-    else:
-        await update.message.reply_text(text, parse_mode=PARSE_MODE, reply_markup=keyboard)
-    return AWAITING_TOKEN
+AWAIT_KEY = "awaiting_input"
 
 
 async def _consume_token_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -122,7 +113,15 @@ async def _consume_token_message(update: Update, context: ContextTypes.DEFAULT_T
     return raw_token
 
 
-async def addshop_receive_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def addshop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/addshop — сразу инструкция и ожидание токена (памятку показывает меню)."""
+    _remember_user(context, update)
+    context.user_data[AWAIT_KEY] = ("addshop", None)
+    text, keyboard = menu.add_instructions_screen()
+    await update.message.reply_text(text, parse_mode=PARSE_MODE, reply_markup=keyboard)
+
+
+async def _do_addshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.bot_data["config"]
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
@@ -132,50 +131,22 @@ async def addshop_receive_token(update: Update, context: ContextTypes.DEFAULT_TY
         try:
             shop = await shops_repo.register_shop(conn, user_id, chat_id, raw_token, config.token_encryption_key)
         except shops_repo.InvalidTokenError as exc:
-            reply_text = f"Не удалось подключить кабинет: {exc}\nПопробуйте /addshop ещё раз."
+            reply_text = f"Не удалось подключить кабинет: {exc}\nПопробуйте ещё раз: /addshop"
         else:
             reply_text = f"✅ Кабинет «{shop.name}» подключён. Уведомления по заказам будут приходить сюда."
 
     await context.bot.send_message(chat_id=chat_id, text=reply_text)
-    return ConversationHandler.END
 
 
-# ── Замена токена ─────────────────────────────────────────────────────────────
-
-
-async def token_replace_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    _, args = menu.parse(query.data)
-    shop_id = int(args[0])
-
-    config: Config = context.bot_data["config"]
-    with db_session(config.db_path) as conn:
-        # Ответ на нажатие даём один раз: либо предупреждением, либо пустым.
-        if members_repo.role_of(conn, shop_id, update.effective_user.id) != "owner":
-            await query.answer("Это может сделать только владелец кабинета.", show_alert=True)
-            return ConversationHandler.END
-        await query.answer()
-        text, keyboard = menu.token_instructions_screen(shop_id)
-
-    context.user_data["replace_shop_id"] = shop_id
-    await query.edit_message_text(text, parse_mode=PARSE_MODE, reply_markup=keyboard)
-    return AWAITING_NEW_TOKEN
-
-
-async def token_replace_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def _do_replace_token(update: Update, context: ContextTypes.DEFAULT_TYPE, shop_id: int) -> None:
     config: Config = context.bot_data["config"]
     chat_id = update.effective_chat.id
-    shop_id = context.user_data.pop("replace_shop_id", None)
     raw_token = await _consume_token_message(update, context)
-
-    if shop_id is None:
-        await context.bot.send_message(chat_id=chat_id, text="Кабинет не выбран. Откройте /menu заново.")
-        return ConversationHandler.END
 
     with db_session(config.db_path) as conn:
         if members_repo.role_of(conn, shop_id, update.effective_user.id) != "owner":
             await context.bot.send_message(chat_id=chat_id, text="Это может сделать только владелец кабинета.")
-            return ConversationHandler.END
+            return
         try:
             shop = await shops_repo.replace_token(conn, shop_id, raw_token, config.token_encryption_key)
         except shops_repo.InvalidTokenError as exc:
@@ -184,31 +155,35 @@ async def token_replace_receive(update: Update, context: ContextTypes.DEFAULT_TY
             reply_text = f"✅ Токен кабинета «{shop.name}» заменён. Опрос продолжается с новым токеном."
 
     await context.bot.send_message(chat_id=chat_id, text=reply_text)
-    return ConversationHandler.END
 
 
-# ── Переименование в профиле ──────────────────────────────────────────────────
-
-
-async def rename_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    await query.message.reply_text("Как вас называть? Пришлите новое имя одним сообщением. /cancel — отмена.")
-    return AWAITING_NAME
-
-
-async def rename_receive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def _do_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.bot_data["config"]
     new_name = update.message.text.strip()[:64]
     with db_session(config.db_path) as conn:
         members_repo.rename_user(conn, update.effective_user.id, new_name)
     await update.message.reply_text(f"Готово, теперь вы — {new_name}. Меню — /menu")
-    return ConversationHandler.END
 
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Отменено.")
-    return ConversationHandler.END
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Единственный обработчик текста: смотрит, чего мы ждём от пользователя."""
+    awaiting = context.user_data.pop(AWAIT_KEY, None)
+    if awaiting is None:
+        await update.message.reply_text("Не понимаю. Откройте меню — /menu")
+        return
+
+    kind, arg = awaiting
+    if kind == "addshop":
+        await _do_addshop(update, context)
+    elif kind == "replace_token":
+        await _do_replace_token(update, context, int(arg))
+    elif kind == "rename":
+        await _do_rename(update, context)
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.pop(AWAIT_KEY, None)
+    await update.message.reply_text("Отменено. Меню — /menu")
 
 
 # ── Кнопки под уведомлениями ──────────────────────────────────────────────────
@@ -300,6 +275,7 @@ async def unmute_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 BOT_COMMANDS = [
     BotCommand("menu", "🧭 Меню кабинета"),
     BotCommand("addshop", "➕ Подключить кабинет"),
+    BotCommand("cancel", "Отменить ввод"),
     BotCommand("start", "Приветствие"),
 ]
 
@@ -323,51 +299,16 @@ def build_application(config: Config) -> Application:
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu_command))
+    app.add_handler(CommandHandler("addshop", addshop_command))
+    app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CommandHandler("unmute", unmute_command))
 
-    # Диалоги регистрируются ДО общего CallbackQueryHandler: внутри одной группы
-    # обработчиков побеждает первый подходящий, и иначе их точки входа
-    # (нажатия кнопок) перехватил бы общий обработчик.
-    app.add_handler(
-        ConversationHandler(
-            entry_points=[
-                CommandHandler("addshop", addshop_start),
-                # Памятку «Прежде чем начать» рисует меню, сюда ведёт её кнопка
-                # «Понятно, продолжить».
-                CallbackQueryHandler(addshop_start, pattern=r"^m\|addtok$"),
-            ],
-            states={AWAITING_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, addshop_receive_token)]},
-            fallbacks=[
-                CommandHandler("cancel", cancel),
-                # «Отмена» возвращает в главное меню — диалог обязан завершиться,
-                # иначе следующее сообщение уйдёт в него как токен.
-                CallbackQueryHandler(on_button, pattern=r"^m\|main$"),
-            ],
-        )
-    )
-    app.add_handler(
-        ConversationHandler(
-            entry_points=[CallbackQueryHandler(token_replace_start, pattern=r"^m\|tokrep2\|")],
-            states={AWAITING_NEW_TOKEN: [MessageHandler(filters.TEXT & ~filters.COMMAND, token_replace_receive)]},
-            fallbacks=[
-                CommandHandler("cancel", cancel),
-                # Кнопка «Отмена» на экране инструкции ведёт обратно к токенам —
-                # диалог при этом обязан завершиться, иначе следующее сообщение
-                # пользователя уйдёт в него как токен.
-                CallbackQueryHandler(on_button, pattern=r"^m\|tok\|"),
-            ],
-        )
-    )
-    app.add_handler(
-        ConversationHandler(
-            entry_points=[CallbackQueryHandler(rename_start, pattern=r"^m\|rename$")],
-            states={AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, rename_receive)]},
-            fallbacks=[CommandHandler("cancel", cancel)],
-        )
-    )
-
     app.add_handler(CallbackQueryHandler(on_button))
+    # Текст обрабатываем последним: команды и нажатия кнопок уже разобраны выше,
+    # сюда доходит только то, что пользователь набрал руками.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
     return app
 
 

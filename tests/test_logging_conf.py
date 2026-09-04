@@ -13,6 +13,12 @@ def test_httpx_requests_are_not_logged_at_info():
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
 
 
-def test_our_own_loggers_still_talk():
+def test_our_own_loggers_stay_louder_than_httpx():
+    """Глушим именно httpx, а не логирование целиком: свои сообщения о синке и
+    рассылке в журнале нужны."""
+    logging.getLogger().setLevel(logging.INFO)
     setup_logging("INFO")
-    assert logging.getLogger("wbnotify.scheduler.jobs").isEnabledFor(logging.INFO)
+
+    httpx_level = logging.getLogger("httpx").getEffectiveLevel()
+    ours = logging.getLogger("wbnotify.scheduler.jobs").getEffectiveLevel()
+    assert httpx_level > ours

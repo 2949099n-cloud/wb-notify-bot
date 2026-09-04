@@ -14,3 +14,9 @@ def setup_logging(level: str = "INFO") -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
         stream=sys.stdout,
     )
+    # httpx на INFO печатает URL каждого запроса, а Telegram кладёт токен бота
+    # прямо в путь: api.telegram.org/bot<ТОКЕН>/getUpdates. При опросе раз в
+    # 10 секунд токен попадал в журнал сотни раз в сутки — а журнал читают через
+    # консоль, копируют в переписку и присылают в поддержку. Оставляем только
+    # предупреждения и ошибки; запросы к WB мы и так логируем сами, осмысленно.
+    logging.getLogger("httpx").setLevel(logging.WARNING)

@@ -37,9 +37,10 @@ PREFIX = "m"
 AWAIT_KEY = "awaiting_input"
 RULE = "━━━━━━━━━━━━━━━━━━━"
 
-# Тарифы показываются справочно: приём платежей не подключён (решение
-# пользователя), продление делается вручную владельцем бота.
-TARIFFS = [(30, 600), (60, 1100), (90, 1500), (180, 2700)]
+# Подписка сейчас бесплатная (решение пользователя): ни цен, ни тарифов в
+# интерфейсе нет. Когда платежи понадобятся, добавлять их надо здесь и в
+# billing_screen, а не возвращать прежний экран тарифов.
+SUBSCRIPTION_IS_FREE = True
 
 
 def cb(action: str, *args) -> str:
@@ -369,30 +370,6 @@ def invite_screen(conn: sqlite3.Connection, shop_id: int, user_id: int, bot_user
 # ── Подписка, управление, профиль ─────────────────────────────────────────────
 
 
-def subscription_screen(conn: sqlite3.Connection, shop_id: int):
-    shop = shops_repo.get_shop(conn, shop_id)
-    if shop.subscription_expires_at:
-        try:
-            left = (datetime.fromisoformat(shop.subscription_expires_at) - datetime.now(timezone.utc)).days
-        except ValueError:
-            left = 0
-        until = f"до {_date(shop.subscription_expires_at)} ({max(left, 0)} д.)"
-    else:
-        until = "бессрочно"
-    status = "Активна" if shop.subscription_status == "active" else "Истекла"
-    text = (
-        f"💳 <b>Подписка · {_esc(shop.name)}</b>\n{RULE}\n"
-        f"<i>Статус:</i> <b>{status}</b> · {until}\n\n"
-        "<i>Тарифы:</i>"
-    )
-    rows = [
-        [InlineKeyboardButton(f"🗓 {days} дней · {price}₽", callback_data=cb("pay", shop_id, days))]
-        for days, price in TARIFFS
-    ]
-    rows.append([InlineKeyboardButton("‹ Назад", callback_data=cb("shop", shop_id))])
-    return text, InlineKeyboardMarkup(rows)
-
-
 def manage_screen(conn: sqlite3.Connection, shop_id: int):
     shop = shops_repo.get_shop(conn, shop_id)
     text = (
@@ -450,21 +427,15 @@ def profile_screen(conn: sqlite3.Connection, user_id: int, chat_id: int):
 
 def billing_screen(conn: sqlite3.Connection, user_id: int):
     shops = members_repo.list_user_shops(conn, user_id)
-    lines = [f"💳 <b>Подписка и оплата</b>", RULE]
+    lines = ["💳 <b>Подписка и оплата</b>", RULE, "<b>Подписка сейчас бесплатная</b> — платить ничего не нужно.", ""]
     if not shops:
         lines.append("Кабинет ещё не подключён.")
-    for shop in shops:
-        row = shops_repo.get_shop(conn, shop["id"])
-        status = "Активна" if row.subscription_status == "active" else "Истекла"
-        until = _date(row.subscription_expires_at) if row.subscription_expires_at else "бессрочно"
-        lines.append(f"🏢 {_esc(row.name)} — <b>{status}</b> · {until}")
-    lines += ["", "<i>Тарифы:</i>"]
-    rows = [
-        [InlineKeyboardButton(f"🗓 {days} дней · {price}₽", callback_data=cb("pay", 0, days))]
-        for days, price in TARIFFS
-    ]
-    rows.append([InlineKeyboardButton("‹ Назад", callback_data=cb("main"))])
-    return "\n".join(lines), InlineKeyboardMarkup(rows)
+    else:
+        lines.append("<i>Ваши кабинеты:</i>")
+        for shop in shops:
+            lines.append(f"🏢 {_esc(shop['name'])} — доступ открыт")
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("‹ Назад", callback_data=cb("main"))]])
+    return "\n".join(lines), keyboard
 
 
 # ── Роутер ────────────────────────────────────────────────────────────────────
@@ -605,17 +576,12 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _show(query, *main_menu(conn, user_id))
             await ack("Аккаунт удалён.", alert=True)
 
-        elif action == "sub":
-            await _show(query, *subscription_screen(conn, shop_id))
-
         elif action == "billing":
             await _show(query, *billing_screen(conn, user_id))
 
-        elif action == "pay":
-            await ack(
-                "Приём платежей ещё не подключён. Напишите владельцу бота — подписку продлят вручную.",
-                alert=True,
-            )
+        elif action in ("sub", "pay"):
+            # Кнопки со старых экранов тарифов — они ещё висят в чате.
+            await ack("Подписка сейчас бесплатная — платить ничего не нужно.", alert=True)
 
         elif action == "manage":
             await _show(query, *manage_screen(conn, shop_id))

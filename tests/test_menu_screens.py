@@ -139,6 +139,15 @@ def test_subscription_button_is_inactive_while_free(conn):
     assert sub.callback_data == f"m|subfree|{shop_id}"
 
 
+def test_billing_screen_shows_no_prices(conn):
+    """Подписка бесплатная — ни цен, ни тарифов на экране быть не должно."""
+    _shop(conn)
+    text, markup = menu.billing_screen(conn, OWNER_ID)
+    assert "бесплатная" in text
+    assert "₽" not in text
+    assert _buttons(markup) == ["‹ Назад"]
+
+
 def test_profile_has_delete_account(conn):
     _shop(conn)
     assert "🗑 Удалить аккаунт" in _buttons(menu.profile_screen(conn, OWNER_ID, OWNER_CHAT)[1])

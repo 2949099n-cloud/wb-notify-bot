@@ -295,3 +295,30 @@ def test_order_velocity_counts_whole_article_not_one_size(conn):
     # 7 заказов по артикулу за 7 дней = 1.0 шт/день, независимо от размера в кнопке
     assert order_velocity(conn, shop_id, 555, "40", 7, asof) == 1.0
     assert order_velocity(conn, shop_id, 555, "38", 7, asof) == 1.0
+
+
+def test_sales_and_buyout_rate_count_whole_article(conn):
+    """Продажи и % выкупа тоже считаются по артикулу целиком, а не по размеру."""
+    from wbnotify.calc.metrics import buyout_rate_with_returns, sales_count
+
+    _insert_shop(conn)
+    asof = "2026-09-03T00:00:00"
+    # Четыре заказа одного артикула разных размеров, выкуплены два.
+    for index, size in enumerate(["38", "39", "40", "41"]):
+        conn.execute(
+            "INSERT INTO orders (shop_id, srid, date, last_change_date, nm_id, tech_size, raw_json)"
+            " VALUES (?, ?, '2026-09-01T10:00:00', '2026-09-01T10:00:00', 555, ?, '{}')",
+            (SHOP_ID, f"srid-{index}", size),
+        )
+    for index, size in enumerate(["38", "40"]):
+        conn.execute(
+            "INSERT INTO sales (shop_id, sale_id, srid, is_return, date, last_change_date, nm_id, tech_size, raw_json)"
+            " VALUES (?, ?, ?, 0, '2026-09-02T10:00:00', '2026-09-02T10:00:00', 555, ?, '{}')",
+            (SHOP_ID, f"S-{index}", f"srid-{0 if size == '38' else 2}", size),
+        )
+    conn.commit()
+
+    # Размер в аргументе больше не влияет: считаем по всему артикулу.
+    assert sales_count(conn, SHOP_ID, 555, "41", 7, asof) == 2
+    assert sales_count(conn, SHOP_ID, 555, "38", 7, asof) == 2
+    assert buyout_rate_with_returns(conn, SHOP_ID, 555, "41", 7, asof) == 50.0

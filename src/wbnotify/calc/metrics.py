@@ -87,11 +87,16 @@ def order_velocity(
 def sales_count(
     conn: sqlite3.Connection, shop_id: int, nm_id: int, tech_size: str, window_days: int, asof: str | None = None
 ) -> int:
-    """Кол-во ВЫКУПОВ (не заказов) за period — is_return=0 в sales."""
+    """Кол-во ВЫКУПОВ (не заказов) за period — is_return=0 в sales.
+
+    По АРТИКУЛУ ЦЕЛИКОМ, без разбивки по размерам — как и скорость заказов
+    (решение пользователя). `tech_size` оставлен в сигнатуре ради единообразия
+    вызовов блока аналитики, но в запросе не участвует.
+    """
     cutoff, upper = _window_bounds(window_days, asof)
     return conn.execute(
-        "SELECT COUNT(*) FROM sales WHERE shop_id=? AND nm_id=? AND tech_size=? AND is_return=0 AND date >= ? AND date < ?",
-        (shop_id, nm_id, tech_size, cutoff, upper),
+        "SELECT COUNT(*) FROM sales WHERE shop_id=? AND nm_id=? AND is_return=0 AND date >= ? AND date < ?",
+        (shop_id, nm_id, cutoff, upper),
     ).fetchone()[0]
 
 
@@ -107,13 +112,17 @@ def buyout_rate_with_returns(
     СДЕЛАННЫЕ в окне [cutoff; asof], и смотрим, у скольких ИЗ ЭТИХ конкретных
     заказов (по srid) в итоге есть продажа — независимо от того, когда сама
     продажа произошла (выкуп может случиться и позже окна заказа).
+
+    Когорта берётся по АРТИКУЛУ ЦЕЛИКОМ, без разбивки по размерам (решение
+    пользователя) — как скорость заказов и количество продаж. `tech_size`
+    оставлен в сигнатуре ради единообразия вызовов блока аналитики.
     """
     cutoff, upper = _window_bounds(window_days, asof)
     cohort_srids = [
         r["srid"]
         for r in conn.execute(
-            "SELECT srid FROM orders WHERE shop_id=? AND nm_id=? AND tech_size=? AND date >= ? AND date < ?",
-            (shop_id, nm_id, tech_size, cutoff, upper),
+            "SELECT srid FROM orders WHERE shop_id=? AND nm_id=? AND date >= ? AND date < ?",
+            (shop_id, nm_id, cutoff, upper),
         )
     ]
     if not cohort_srids:

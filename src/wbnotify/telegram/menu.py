@@ -87,6 +87,7 @@ def main_menu(conn: sqlite3.Connection, user_id: int) -> tuple[str, InlineKeyboa
             [InlineKeyboardButton("💳 Подписка и оплата", callback_data=cb("billing"))],
             [InlineKeyboardButton("➕ Подключить ещё кабинет", callback_data=cb("addshop"))],
             [InlineKeyboardButton("👤 Профиль", callback_data=cb("profile"))],
+            [InlineKeyboardButton("🆘 Поддержка", callback_data=cb("support"))],
         ]
     )
     return text, keyboard
@@ -257,6 +258,18 @@ def rename_screen(conn: sqlite3.Connection, user_id: int):
         "Пришлите новое имя одним сообщением."
     )
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=cb("profile"))]])
+    return text, keyboard
+
+
+def support_screen():
+    text = (
+        f"🆘 <b>Поддержка</b>\n{RULE}\n"
+        "Опишите вопрос или проблему одним сообщением — я передам его владельцу бота.\n\n"
+        "Полезно указать, по какому кабинету и что именно не так: например, "
+        "«не приходят уведомления с утра» или «в карточке неверная комиссия».\n\n"
+        "Ответ придёт сюда же, в этот чат."
+    )
+    keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Отмена", callback_data=cb("main"))]])
     return text, keyboard
 
 
@@ -561,6 +574,10 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif action == "rename":
             context.user_data[AWAIT_KEY] = ("rename", None)
             await _show(query, *rename_screen(conn, user_id))
+
+        elif action == "support":
+            context.user_data[AWAIT_KEY] = ("support", None)
+            await _show(query, *support_screen())
 
         elif action == "subfree":
             await ack("Подписка сейчас бесплатная — платить ничего не нужно.", alert=True)

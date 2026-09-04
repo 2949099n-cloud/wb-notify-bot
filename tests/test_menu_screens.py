@@ -51,6 +51,7 @@ def test_main_menu_greets_by_name_and_counts_shops(conn):
         "💳 Подписка и оплата",
         "➕ Подключить ещё кабинет",
         "👤 Профиль",
+        "🆘 Поддержка",
     ]
 
 

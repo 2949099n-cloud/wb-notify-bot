@@ -14,22 +14,29 @@ import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+from wbnotify import admin_alerts
 from wbnotify.db import utcnow
 
 INVITE_TTL_DAYS = 14
 ROLE_TITLES = {"owner": "Владелец", "manager": "Менеджер"}
 
 
-def upsert_user(conn: sqlite3.Connection, user_id: int, display_name: str, chat_id: int) -> None:
+def upsert_user(
+    conn: sqlite3.Connection, user_id: int, display_name: str, chat_id: int, username: str | None = None
+) -> None:
     """Имя обновляем только при первом появлении: пользователь мог переименовать
-    себя в «Профиле», и подставлять поверх имя из Telegram было бы неверно."""
+    себя в «Профиле», и подставлять поверх имя из Telegram было бы неверно.
+    `username` наоборот обновляем всегда — человек может его сменить, а он нужен
+    владельцу бота, чтобы понимать, чей это кабинет."""
     conn.execute(
         """
-        INSERT INTO bot_users (telegram_user_id, display_name, chat_id, created_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(telegram_user_id) DO UPDATE SET chat_id = excluded.chat_id
+        INSERT INTO bot_users (telegram_user_id, display_name, chat_id, username, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(telegram_user_id) DO UPDATE SET
+            chat_id = excluded.chat_id,
+            username = COALESCE(excluded.username, bot_users.username)
         """,
-        (user_id, display_name, chat_id, utcnow()),
+        (user_id, display_name, chat_id, username, utcnow()),
     )
     conn.commit()
 
@@ -39,6 +46,17 @@ def display_name(conn: sqlite3.Connection, user_id: int) -> str:
         "SELECT display_name FROM bot_users WHERE telegram_user_id = ?", (user_id,)
     ).fetchone()
     return row["display_name"] if row else "—"
+
+
+def describe_user(conn: sqlite3.Connection, user_id: int) -> str:
+    """«Имя (@username, id 123)» — строка для служебных сообщений владельцу бота."""
+    row = conn.execute(
+        "SELECT display_name, username FROM bot_users WHERE telegram_user_id = ?", (user_id,)
+    ).fetchone()
+    if row is None:
+        return f"id {user_id}"
+    handle = f"@{row['username']}, " if row["username"] else ""
+    return f"{row['display_name']} ({handle}id {user_id})"
 
 
 def rename_user(conn: sqlite3.Connection, user_id: int, new_name: str) -> None:
@@ -134,8 +152,12 @@ def delete_account(conn: sqlite3.Connection, user_id: int) -> None:
         conn.execute("DELETE FROM shop_members WHERE shop_id = ?", (row["shop_id"],))
 
     conn.execute("DELETE FROM shop_members WHERE telegram_user_id = ?", (user_id,))
+    name = display_name(conn, user_id)
     conn.execute("DELETE FROM bot_users WHERE telegram_user_id = ?", (user_id,))
     conn.commit()
+    admin_alerts.queue(
+        conn, "account_deleted", f"{name} (id {user_id}) удалил аккаунт. Кабинетов отключено: {len(owned)}"
+    )
 
 
 def create_invite(conn: sqlite3.Connection, shop_id: int, created_by: int) -> tuple[str, datetime]:

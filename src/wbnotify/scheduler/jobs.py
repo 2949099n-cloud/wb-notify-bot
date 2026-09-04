@@ -16,6 +16,7 @@ from telegram.error import TelegramError
 
 from wbnotify import shops_repo
 from wbnotify.config import Config
+from wbnotify import admin_alerts
 from wbnotify.db import db_session, utcnow
 from wbnotify.events.classify import classify_shop_events
 from wbnotify.sync import sync_all_active_shops, sync_shop_daily, sync_shop_frequent
@@ -40,6 +41,10 @@ async def poll_and_notify(config: Config) -> None:
     """Основной цикл: свежие данные -> детект событий -> отправка уведомлений."""
     bot = make_bot(config.telegram_bot_token)
     with db_session(config.db_path) as conn:
+        # Алерты владельцу бота шлём до опроса и независимо от него: если
+        # магазинов не осталось совсем, сообщение об этом всё равно должно уйти.
+        await flush_admin_alerts(conn, bot, config)
+
         shops = shops_repo.list_active_shops(conn)
         if not shops:
             logger.info("Активных магазинов нет — цикл опроса пропущен")
@@ -72,6 +77,28 @@ async def poll_and_notify(config: Config) -> None:
                 logger.error("shop_id=%s: ошибка Telegram при рассылке: %s", shop.id, exc)
             except Exception:  # noqa: BLE001 — один магазин не должен ронять цикл
                 logger.exception("shop_id=%s: неожиданная ошибка в цикле опроса", shop.id)
+
+
+async def flush_admin_alerts(conn, bot, config: Config) -> int:
+    """Отправляет владельцу бота накопившиеся служебные алерты.
+
+    Алерты копятся в БД, потому что возникают в репозиториях, где нет ни бота,
+    ни асинхронного контекста (см. admin_alerts.py). Если админ-чат не настроен,
+    просто ничего не делаем — алерты останутся в базе и уйдут, когда настроят.
+    """
+    if config.telegram_admin_chat_id is None:
+        return 0
+
+    sent = 0
+    for alert in admin_alerts.pending(conn):
+        try:
+            await bot.send_message(chat_id=config.telegram_admin_chat_id, text=admin_alerts.render(alert))
+        except TelegramError as exc:
+            logger.error("Не удалось отправить алерт админу (id=%s): %s", alert["id"], exc)
+            break  # чат недоступен — остальные тоже не уйдут, попробуем в следующем цикле
+        admin_alerts.mark_sent(conn, alert["id"])
+        sent += 1
+    return sent
 
 
 def _start_notifying(conn, shop_id: int) -> None:

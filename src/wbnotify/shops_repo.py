@@ -7,7 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from wbnotify.db import utcnow as _now
-from wbnotify import members_repo
+from wbnotify import admin_alerts, members_repo
 from wbnotify.models import ShopRow
 from wbnotify.security.tokens import decrypt_token, encrypt_token
 from wbnotify.wb_api.client import WBAuthError, WBError, ping, seller_info
@@ -70,6 +70,12 @@ async def register_shop(
     # Владелец сразу становится участником кабинета: рассылка ходит по
     # shop_members, а не по shops.telegram_chat_id (см. members_repo).
     members_repo.add_owner(conn, shop_id, owner_user_id, telegram_chat_id)
+    admin_alerts.queue(
+        conn,
+        "shop_connected",
+        f"«{name}» подключил {members_repo.describe_user(conn, owner_user_id)}",
+        shop_id,
+    )
     return get_shop(conn, shop_id)
 
 
@@ -131,7 +137,9 @@ def revoke_token(conn: sqlite3.Connection, shop_id: int) -> None:
     Сам токен в личном кабинете WB этим НЕ отзывается — у WB API нет метода
     отзыва чужого токена, это делается руками в разделе «Доступ к API».
     """
-    mark_token_invalid(conn, shop_id)
+    mark_token_invalid(
+        conn, shop_id, reason="Токен отозван владельцем кабинета", kind="token_revoked"
+    )
 
 
 def deactivate_shop(conn: sqlite3.Connection, shop_id: int) -> None:
@@ -142,9 +150,17 @@ def deactivate_shop(conn: sqlite3.Connection, shop_id: int) -> None:
     кабинет удалением флага нельзя и не нужно: подключение заводит новый id.
     """
     now = _now()
+    shop = conn.execute("SELECT name, owner_user_id FROM shops WHERE id = ?", (shop_id,)).fetchone()
     conn.execute("UPDATE shops SET is_active = 0, updated_at = ? WHERE id = ?", (now, shop_id))
     conn.execute("DELETE FROM shop_members WHERE shop_id = ?", (shop_id,))
     conn.commit()
+    if shop is not None:
+        admin_alerts.queue(
+            conn,
+            "shop_deleted",
+            f"«{shop['name']}» (id {shop_id}) удалил {members_repo.describe_user(conn, shop['owner_user_id'])}",
+            shop_id,
+        )
 
 
 def get_shop(conn: sqlite3.Connection, shop_id: int) -> ShopRow:
@@ -198,7 +214,14 @@ def get_decrypted_token(conn: sqlite3.Connection, shop_id: int, enc_key: str) ->
     return decrypt_token(row["wb_api_token_encrypted"], enc_key)
 
 
-def mark_token_invalid(conn: sqlite3.Connection, shop_id: int) -> None:
+def mark_token_invalid(
+    conn: sqlite3.Connection,
+    shop_id: int,
+    reason: str = "WB API вернул 401",
+    kind: str = "token_invalid",
+) -> None:
+    """`reason` и `kind` попадают в алерт владельцу бота: 401 от WB и ручной
+    отзыв владельцем кабинета — разные события, путать их в статистике не нужно."""
     now = _now()
     conn.execute(
         "UPDATE shops SET token_status = 'invalid', token_checked_at = ?, updated_at = ? WHERE id = ?",
@@ -212,3 +235,12 @@ def mark_token_invalid(conn: sqlite3.Connection, shop_id: int) -> None:
         (shop_id, "Токен магазина недействителен — требуется переподключение через /addshop", now),
     )
     conn.commit()
+    shop = conn.execute("SELECT name, owner_user_id FROM shops WHERE id = ?", (shop_id,)).fetchone()
+    if shop is not None:
+        admin_alerts.queue(
+            conn,
+            kind,
+            f"«{shop['name']}» (id {shop_id}, {members_repo.describe_user(conn, shop['owner_user_id'])})\n"
+            f"{reason}. Опрос кабинета остановлен.",
+            shop_id,
+        )

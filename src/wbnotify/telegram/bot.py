@@ -26,7 +26,7 @@ from telegram.request import HTTPXRequest
 from wbnotify import members_repo, shops_repo
 from wbnotify.config import Config
 from wbnotify.db import db_session
-from wbnotify.telegram import menu
+from wbnotify.telegram import admin, menu
 from wbnotify.telegram.formatters import PARSE_MODE, format_stocks_detail
 from wbnotify.telegram.keyboards import ACTION_APPEARANCE, ACTION_MUTE, ACTION_STOCKS, parse_callback
 
@@ -42,7 +42,11 @@ def _remember_user(context: ContextTypes.DEFAULT_TYPE, update: Update) -> None:
     config: Config = context.bot_data["config"]
     with db_session(config.db_path) as conn:
         members_repo.upsert_user(
-            conn, user.id, user.full_name or user.username or str(user.id), update.effective_chat.id
+            conn,
+            user.id,
+            user.full_name or user.username or str(user.id),
+            update.effective_chat.id,
+            user.username,
         )
 
 
@@ -83,6 +87,20 @@ async def menu_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     with db_session(config.db_path) as conn:
         text, keyboard = menu.main_menu(conn, update.effective_user.id)
     await update.message.reply_text(text, parse_mode=PARSE_MODE, reply_markup=keyboard)
+
+
+async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Статистика по всем кабинетам — только владельцу бота."""
+    config: Config = context.bot_data["config"]
+    if not admin.is_admin(config, update.effective_chat.id):
+        if config.telegram_admin_chat_id is None:
+            await update.message.reply_text(
+                "Панель выключена: в .env не задан TELEGRAM_ADMIN_CHAT_ID."
+            )
+        return  # чужому пользователю не отвечаем вовсе — команды как будто нет
+
+    with db_session(config.db_path) as conn:
+        await update.message.reply_text(admin.stats_text(conn), parse_mode=PARSE_MODE)
 
 
 # ── Ввод текста: подключение кабинета, замена токена, переименование ──────────
@@ -165,8 +183,58 @@ async def _do_rename(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.message.reply_text(f"Готово, теперь вы — {new_name}. Меню — /menu")
 
 
+async def _do_support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Пересылает обращение владельцу бота и запоминает, кому отвечать."""
+    config: Config = context.bot_data["config"]
+    if config.telegram_admin_chat_id is None:
+        await update.message.reply_text("Поддержка сейчас недоступна. Попробуйте позже.")
+        return
+
+    user_id = update.effective_user.id
+    with db_session(config.db_path) as conn:
+        header = admin.support_header(conn, user_id)
+
+    sent = await context.bot.send_message(
+        chat_id=config.telegram_admin_chat_id,
+        text=f"{header}\n\n{update.message.text}",
+        parse_mode=PARSE_MODE,
+    )
+    with db_session(config.db_path) as conn:
+        admin.remember_thread(conn, sent.message_id, user_id, update.effective_chat.id)
+
+    await update.message.reply_text(
+        "✅ Обращение отправлено. Ответ придёт сюда же, в этот чат."
+    )
+
+
+async def _relay_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Ответ владельца реплаем на обращение -> обратно автору. True, если это
+    действительно был ответ на обращение и его обработали."""
+    config: Config = context.bot_data["config"]
+    if not admin.is_admin(config, update.effective_chat.id):
+        return False
+    reply_to = update.message.reply_to_message
+    if reply_to is None:
+        return False
+
+    with db_session(config.db_path) as conn:
+        thread = admin.thread_by_message(conn, reply_to.message_id)
+    if thread is None:
+        return False
+
+    await context.bot.send_message(
+        chat_id=thread["chat_id"], text=f"💬 <b>Ответ поддержки</b>\n\n{update.message.text}",
+        parse_mode=PARSE_MODE,
+    )
+    await update.message.reply_text("Отправлено.")
+    return True
+
+
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Единственный обработчик текста: смотрит, чего мы ждём от пользователя."""
+    if await _relay_admin_reply(update, context):
+        return
+
     awaiting = context.user_data.pop(AWAIT_KEY, None)
     if awaiting is None:
         await update.message.reply_text("Не понимаю. Откройте меню — /menu")
@@ -179,6 +247,8 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _do_replace_token(update, context, int(arg))
     elif kind == "rename":
         await _do_rename(update, context)
+    elif kind == "support":
+        await _do_support(update, context)
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -301,6 +371,7 @@ def build_application(config: Config) -> Application:
     app.add_handler(CommandHandler("menu", menu_command))
     app.add_handler(CommandHandler("addshop", addshop_command))
     app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("admin", admin_command))
     app.add_handler(CommandHandler("settings", settings_command))
     app.add_handler(CommandHandler("unmute", unmute_command))
 

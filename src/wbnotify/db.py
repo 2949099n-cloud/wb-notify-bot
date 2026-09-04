@@ -77,6 +77,27 @@ CREATE TABLE IF NOT EXISTS shop_invites (
   used_by INTEGER
 );
 
+-- Служебные уведомления владельцу бота: подключения, сбои, отток. Копятся в
+-- БД и рассылаются планировщиком (см. admin_alerts.py).
+CREATE TABLE IF NOT EXISTS admin_alerts (
+  id INTEGER PRIMARY KEY,
+  kind TEXT NOT NULL,
+  shop_id INTEGER,                       -- может быть NULL: удаление аккаунта не привязано к кабинету
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  sent_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_admin_alerts_unsent ON admin_alerts(sent_at);
+
+-- Обращения в поддержку: связь «сообщение в чате админа» -> «кто его написал»,
+-- чтобы ответ реплаем ушёл обратно нужному человеку.
+CREATE TABLE IF NOT EXISTS support_threads (
+  admin_message_id INTEGER PRIMARY KEY,
+  user_id INTEGER NOT NULL,
+  chat_id INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sync_cursors (
   shop_id INTEGER NOT NULL REFERENCES shops(id),
   endpoint TEXT NOT NULL CHECK(endpoint IN ('orders','sales','stocks','cards','tariffs')),
@@ -336,6 +357,7 @@ _COLUMN_MIGRATIONS = [
     ("stocks_current", "warehouse_kind", "TEXT NOT NULL DEFAULT 'wb'"),
     ("shops", "notify_from", "TEXT"),
     ("notification_queue", "event_date", "TEXT"),
+    ("bot_users", "username", "TEXT"),
 ]
 
 

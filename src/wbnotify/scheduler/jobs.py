@@ -17,6 +17,7 @@ from telegram.error import TelegramError
 from wbnotify import shops_repo
 from wbnotify.config import Config
 from wbnotify import admin_alerts
+from wbnotify.telegram import admin_notifier
 from wbnotify.db import db_session, utcnow
 from wbnotify.events.classify import classify_shop_events
 from wbnotify.sync import sync_all_active_shops, sync_shop_daily, sync_shop_frequent
@@ -41,9 +42,11 @@ async def poll_and_notify(config: Config) -> None:
     """Основной цикл: свежие данные -> детект событий -> отправка уведомлений."""
     bot = make_bot(config.telegram_bot_token)
     with db_session(config.db_path) as conn:
-        # Алерты владельцу бота шлём до опроса и независимо от него: если
-        # магазинов не осталось совсем, сообщение об этом всё равно должно уйти.
-        await flush_admin_alerts(conn, bot, config)
+        # Алерты владельцу шлём до опроса и независимо от него: если магазинов
+        # не осталось совсем, сообщение об этом всё равно должно уйти. Отправляем
+        # служебным ботом, когда он настроен — админская лента не должна
+        # попадать в чат с заказами.
+        await flush_admin_alerts(conn, admin_notifier.make_admin_bot(config) or bot, config)
 
         shops = shops_repo.list_active_shops(conn)
         if not shops:
@@ -85,6 +88,8 @@ async def flush_admin_alerts(conn, bot, config: Config) -> int:
     Алерты копятся в БД, потому что возникают в репозиториях, где нет ни бота,
     ни асинхронного контекста (см. admin_alerts.py). Если админ-чат не настроен,
     просто ничего не делаем — алерты останутся в базе и уйдут, когда настроят.
+
+    `bot` выбирает вызывающий: служебный, если он настроен, иначе основной.
     """
     if config.telegram_admin_chat_id is None:
         return 0

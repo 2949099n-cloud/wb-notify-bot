@@ -1,0 +1,31 @@
+[Unit]
+Description=wb-notify-bot — служебный бот владельца (статистика, алерты, поддержка)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wbnotify
+WorkingDirectory=/opt/wb-notify-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=Europe/Moscow
+# Третий процесс: держит getUpdates служебного бота. Нужен только если в .env
+# задан TELEGRAM_ADMIN_BOT_TOKEN — без него процесс сразу завершится с ошибкой,
+# поэтому deploy/update.sh включает его только при наличии токена.
+ExecStart=/opt/wb-notify-bot/.venv/bin/python scripts/run_admin_bot.py
+
+Restart=always
+RestartSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wbnotify-admin
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/wb-notify-bot/data
+
+[Install]
+WantedBy=multi-user.target

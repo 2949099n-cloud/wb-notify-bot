@@ -141,3 +141,60 @@ async def test_flush_does_nothing_without_admin_chat(conn, tmp_path):
     assert sent == 0
     bot.send_message.assert_not_awaited()
     assert len(admin_alerts.pending(conn)) == 1
+
+
+def test_alerts_go_to_separate_bot_when_configured(tmp_path):
+    """Служебный бот настроен — админская лента уходит им, а не основным."""
+    from wbnotify.telegram import admin_notifier
+
+    config = _config(str(tmp_path / "x.db"))
+    config = Config(**{**config.__dict__, "telegram_admin_bot_token": "222:ADMIN"})
+
+    assert admin_notifier.uses_separate_bot(config) is True
+    assert admin_notifier.make_admin_bot(config).token == "222:ADMIN"
+
+
+def test_alerts_fall_back_to_main_bot(tmp_path):
+    from wbnotify.telegram import admin_notifier
+
+    config = _config(str(tmp_path / "x.db"))
+    assert admin_notifier.uses_separate_bot(config) is False
+    assert admin_notifier.make_admin_bot(config).token == "dummy"
+
+
+def test_no_admin_bot_without_admin_chat(tmp_path):
+    """Некуда слать — не создаём бота вовсе."""
+    from wbnotify.telegram import admin_notifier
+
+    config = _config(str(tmp_path / "x.db"), admin_chat=None)
+    assert admin_notifier.make_admin_bot(config) is None
+
+
+def test_shops_page_splits_long_list(conn):
+    """Сотня кабинетов не должна вываливаться одним сообщением."""
+    from wbnotify.telegram.admin import SHOPS_PER_PAGE
+
+    for index in range(SHOPS_PER_PAGE + 3):
+        _shop(conn, f"Кабинет {index}")
+
+    first, page, pages = admin.shops_page(conn, 0)
+    assert (page, pages) == (0, 2)
+    assert first.count("(id ") == SHOPS_PER_PAGE
+
+    second, page, pages = admin.shops_page(conn, 1)
+    assert (page, pages) == (1, 2)
+    assert second.count("(id ") == 3
+
+    # Выход за границы не должен ломать экран.
+    assert admin.shops_page(conn, 99)[1] == 1
+
+
+def test_summary_lists_only_problem_shops(conn):
+    """В сводке — цифры и проблемные кабинеты, остальные постранично."""
+    _shop(conn, "Рабочий")
+    _shop(conn, "Сбойный", token_status="invalid")
+
+    text = admin.stats_text(conn)
+    assert "Требуют внимания" in text
+    assert "Сбойный" in text
+    assert "Рабочий" not in text

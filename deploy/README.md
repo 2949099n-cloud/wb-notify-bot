@@ -76,6 +76,11 @@ nano .env
 
 Заполнить `TELEGRAM_BOT_TOKEN`, `TOKEN_ENCRYPTION_KEY`, `TELEGRAM_ADMIN_CHAT_ID`.
 
+`TELEGRAM_ADMIN_BOT_TOKEN` — отдельный бот для служебной ленты владельца:
+статистика `/admin`, оповещения о кабинетах и обращения в поддержку. Создаётся
+в @BotFather так же, как основной. Если его не задать, всё это придёт в основной
+бот и смешается с лентой заказов.
+
 > **`TOKEN_ENCRYPTION_KEY` — тот же самый, что на рабочей машине.** Этим ключом
 > зашифрованы WB-токены магазинов в базе. Другой ключ = токены не расшифруются
 > и все магазины придётся подключать заново.
@@ -108,14 +113,16 @@ sudo -u wbnotify .venv/bin/python scripts/check_connectivity.py
 
 ## 8. Запустить как сервис
 
-Процессов два: `wbnotify` — планировщик (опрос WB и рассылка уведомлений),
-`wbnotify-bot` — сам бот (команды `/addshop`, `/settings` и нажатия кнопок меню).
-Нажатия к планировщику не приходят, поэтому нужны оба.
+Процессов три: `wbnotify` — планировщик (опрос WB и рассылка уведомлений),
+`wbnotify-bot` — сам бот (команды и нажатия кнопок меню), `wbnotify-admin` —
+служебный бот владельца. Нажатия к планировщику не приходят, поэтому первые два
+нужны оба; третий запускается только при заданном `TELEGRAM_ADMIN_BOT_TOKEN`.
 
 ```bash
-cp deploy/wbnotify.service deploy/wbnotify-bot.service /etc/systemd/system/
+cp deploy/*.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now wbnotify wbnotify-bot
+systemctl enable --now wbnotify-admin    # только если задан TELEGRAM_ADMIN_BOT_TOKEN
 systemctl status wbnotify wbnotify-bot
 ```
 

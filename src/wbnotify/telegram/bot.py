@@ -26,7 +26,7 @@ from telegram.request import HTTPXRequest
 from wbnotify import members_repo, shops_repo
 from wbnotify.config import Config
 from wbnotify.db import db_session
-from wbnotify.telegram import admin, menu
+from wbnotify.telegram import admin, admin_notifier, menu
 from wbnotify.telegram.formatters import PARSE_MODE, format_stocks_detail
 from wbnotify.telegram.keyboards import ACTION_APPEARANCE, ACTION_MUTE, ACTION_STOCKS, parse_callback
 
@@ -98,6 +98,10 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "Панель выключена: в .env не задан TELEGRAM_ADMIN_CHAT_ID."
             )
         return  # чужому пользователю не отвечаем вовсе — команды как будто нет
+
+    if admin_notifier.uses_separate_bot(config):
+        await update.message.reply_text("Статистика переехала в служебный бот — откройте его и наберите /admin.")
+        return
 
     with db_session(config.db_path) as conn:
         await update.message.reply_text(admin.stats_text(conn), parse_mode=PARSE_MODE)
@@ -194,7 +198,10 @@ async def _do_support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     with db_session(config.db_path) as conn:
         header = admin.support_header(conn, user_id)
 
-    sent = await context.bot.send_message(
+    # Обращение уходит служебным ботом, если он настроен: у владельца в этом
+    # боте своя лента заказов, и поддержка вперемешку с ней нечитаема.
+    admin_bot = admin_notifier.make_admin_bot(config) or context.bot
+    sent = await admin_bot.send_message(
         chat_id=config.telegram_admin_chat_id,
         text=f"{header}\n\n{update.message.text}",
         parse_mode=PARSE_MODE,
@@ -209,8 +216,14 @@ async def _do_support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def _relay_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Ответ владельца реплаем на обращение -> обратно автору. True, если это
-    действительно был ответ на обращение и его обработали."""
+    действительно был ответ на обращение и его обработали.
+
+    Нужен только когда служебного бота нет: с ним ответы приходят туда, и их
+    разбирает telegram/admin_bot.py.
+    """
     config: Config = context.bot_data["config"]
+    if admin_notifier.uses_separate_bot(config):
+        return False
     if not admin.is_admin(config, update.effective_chat.id):
         return False
     reply_to = update.message.reply_to_message

@@ -17,7 +17,7 @@ class ConfigError(RuntimeError):
 class Config:
     telegram_bot_token: str
     token_encryption_key: str  # Fernet key для шифрования WB-токенов магазинов в БД
-    telegram_admin_chat_id: int | None  # опционально: оперативные алерты/смоук-тест
+    telegram_admin_chat_id: int | None  # опционально: чат владельца бота для панели и алертов
     poll_interval_minutes: int
     stocks_poll_interval_minutes: int
     cards_refresh_hour_msk: int
@@ -25,6 +25,11 @@ class Config:
     db_path: str
     timezone: str
     log_level: str
+    # Отдельный бот для админской ленты: статистика, служебные алерты и
+    # обращения в поддержку. Нужен, чтобы всё это не смешивалось с лентой
+    # заказов в основном боте (при сотне кабинетов она станет нечитаемой).
+    # Не задан — админская часть работает в основном боте, как раньше.
+    telegram_admin_bot_token: str | None = None
 
 
 def _require(env: dict, key: str) -> str:
@@ -44,6 +49,7 @@ def load_config(env_file: str | None = None) -> Config:
         telegram_bot_token=_require(env, "TELEGRAM_BOT_TOKEN"),
         token_encryption_key=_require(env, "TOKEN_ENCRYPTION_KEY"),
         telegram_admin_chat_id=int(admin_chat_id_raw) if admin_chat_id_raw else None,
+        telegram_admin_bot_token=env.get("TELEGRAM_ADMIN_BOT_TOKEN") or None,
         # 5 минут: уведомления должны приходить постепенно, а не пачкой раз в
         # полчаса. Лимиты WB это позволяют — /orders и /sales по 1 запросу/мин.
         poll_interval_minutes=int(env.get("POLL_INTERVAL_MINUTES", "5")),

@@ -185,3 +185,31 @@ def test_scheduler_jobs_are_configured():
     for job in jobs.values():
         assert job.max_instances == 1, "параллельные прогоны одного задания недопустимы"
         assert job.coalesce is True, "пропущенные срабатывания должны схлопываться"
+
+
+async def test_new_shop_starts_notifying_after_first_sync(conn, monkeypatch, tmp_path):
+    """Свежеподключённый кабинет включает рассылку сам.
+
+    Раньше notify_from приходилось выставлять руками через CLI, и на живом
+    сервере это стоило суток молчания: кабинет исправно синкался, а уведомления
+    не шли вообще.
+    """
+    from wbnotify.scheduler import jobs
+
+    shop_id = _insert_shop(conn, notify_from=None)
+    assert conn.execute("SELECT notify_from FROM shops WHERE id=?", (shop_id,)).fetchone()[0] is None
+
+    jobs._start_notifying(conn, shop_id)
+
+    assert conn.execute("SELECT notify_from FROM shops WHERE id=?", (shop_id,)).fetchone()[0] is not None
+
+
+def test_start_notifying_does_not_move_existing_mark(conn):
+    """Повторный вызов не сдвигает отсечку: иначе события, накопившиеся между
+    циклами, потерялись бы."""
+    from wbnotify.scheduler import jobs
+
+    shop_id = _insert_shop(conn, notify_from="2026-01-01T00:00:00+00:00")
+    jobs._start_notifying(conn, shop_id)
+
+    assert conn.execute("SELECT notify_from FROM shops WHERE id=?", (shop_id,)).fetchone()[0] == "2026-01-01T00:00:00+00:00"

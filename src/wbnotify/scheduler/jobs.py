@@ -16,7 +16,7 @@ from telegram.error import TelegramError
 
 from wbnotify import shops_repo
 from wbnotify.config import Config
-from wbnotify.db import db_session
+from wbnotify.db import db_session, utcnow
 from wbnotify.events.classify import classify_shop_events
 from wbnotify.sync import sync_all_active_shops, sync_shop_daily, sync_shop_frequent
 from wbnotify.sync.tariffs_sync import sync_tariffs
@@ -51,7 +51,8 @@ async def poll_and_notify(config: Config) -> None:
                 # имеет карточек: они синкаются раз в сутки. Без них уведомление
                 # уйдёт без названия товара, фото, артикула и остатков — поэтому
                 # первый раз догоняем суточные шаги сразу, не дожидаясь ночи.
-                if not _has_cards(conn, shop.id):
+                first_run = not _has_cards(conn, shop.id)
+                if first_run:
                     logger.info("shop_id=%s: карточек нет — первичный суточный синк", shop.id)
                     await sync_shop_daily(conn, shop, config.token_encryption_key)
 
@@ -62,12 +63,32 @@ async def poll_and_notify(config: Config) -> None:
 
                 events = classify_shop_events(conn, shop.id)
                 new_events = sum(len(v) for v in events.values())
+                if first_run:
+                    _start_notifying(conn, shop.id)
                 sent = await drain_queue_for_shop(conn, bot, shop, limit=DRAIN_LIMIT_PER_CYCLE)
                 logger.info("shop_id=%s: новых событий=%d, отправлено=%d", shop.id, new_events, sent)
             except TelegramError as exc:
                 logger.error("shop_id=%s: ошибка Telegram при рассылке: %s", shop.id, exc)
             except Exception:  # noqa: BLE001 — один магазин не должен ронять цикл
                 logger.exception("shop_id=%s: неожиданная ошибка в цикле опроса", shop.id)
+
+
+def _start_notifying(conn, shop_id: int) -> None:
+    """Включает рассылку для только что подключённого кабинета.
+
+    Вызывается ПОСЛЕ первичного синка и классификации: события исторического
+    бэкфилла (за 90 дней их тысячи) уже лежат в очереди с более ранним
+    created_at, поэтому отсечка их не пропустит, а всё новое пойдёт как обычно.
+    Без этого свежеподключённый кабинет молчал бы навсегда — notify_from
+    приходилось выставлять руками через scripts/notify_cli.py.
+    """
+    row = conn.execute("SELECT notify_from FROM shops WHERE id = ?", (shop_id,)).fetchone()
+    if row is None or row["notify_from"]:
+        return
+    now = utcnow()
+    conn.execute("UPDATE shops SET notify_from = ?, updated_at = ? WHERE id = ?", (now, now, shop_id))
+    conn.commit()
+    logger.info("shop_id=%s: первичный синк завершён — рассылка включена с %s", shop_id, now)
 
 
 async def daily_refresh(config: Config) -> None:

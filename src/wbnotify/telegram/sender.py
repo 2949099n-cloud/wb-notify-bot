@@ -1,18 +1,23 @@
-"""Доставка уведомлений: карусель из 3 фото + подпись, fallback на отдельное
+"""Доставка уведомлений: одна картинка + подпись, fallback на отдельное
 текстовое сообщение при подписи >1024 символов (лимит caption у Telegram Bot API).
 
-История с фото (чтобы не ходить по кругу): пробовали квадратный кроп 1:1 и
-уменьшение до 480px и 160px — Telegram всё равно рендерил первое фото альбома
-отдельным крупным блоком, а на 160px картинка ещё и мылила. Текущий вариант по
-решению пользователя: три первых фото карточки, уменьшенные вчетверо до 450x600
-(исходник WB — 900x1200, аспект 3:4 сохраняется).
+**Три фото склеиваются в ОДНУ картинку**, а не отправляются альбомом. Причины,
+обе выяснены на живых отправках:
+
+1. К альбому (`sendMediaGroup`) Telegram НЕ разрешает прикрепить инлайн-кнопки —
+   уведомления приходили вообще без меню под ними.
+2. Фото альбома открываются по одному в полный экран и рендерятся разного
+   размера, чего пользователь не хотел.
+
+Склеенная картинка — обычное одиночное фото: кнопки к нему прикрепляются, а
+тапнуть «одно из трёх» нельзя, оно одно.
 
 Фото передаются в Telegram БАЙТАМИ, а не URL. Проверено вживую: при передаче
 голого URL Telegram иногда отвечает "Failed to get http url content" на
 конкретном фото, хотя та же самая ссылка прекрасно открывается напрямую
 (curl, 200 OK) — сбой на стороне механизма скачивания по URL у самого Telegram,
-не у WB CDN и не у нас. Скачиваем фото сами (httpx, с retry) и загружаем как
-файл — так на порядок надёжнее. Не скачалось — уходим в текстовый фоллбек.
+не у WB CDN и не у нас. Скачиваем фото сами (httpx, с retry) и собираем коллаж.
+Не скачалось ни одного — уходим в текстовый фоллбек.
 """
 from __future__ import annotations
 
@@ -23,8 +28,8 @@ import sqlite3
 from datetime import timedelta
 
 import httpx
-from PIL import Image
-from telegram import Bot, InputMediaPhoto
+from PIL import Image, ImageOps
+from telegram import Bot
 from telegram.error import TelegramError
 from telegram.request import HTTPXRequest
 
@@ -71,24 +76,40 @@ async def _download_photo(url: str) -> bytes | None:
     return None
 
 
-# Целевой размер фото карусели: 450x600 — ровно вчетверо меньше исходных
-# 900x1200 от WB, аспект 3:4 сохраняется (решение пользователя). Меньше делать
-# нельзя: на 160px Telegram растягивал картинку обратно и она мылила.
-PHOTO_TARGET_SIZE = (450, 600)
+# Каждое фото уменьшается вдевятеро по площади: исходник WB 900x1200 → 300x400,
+# аспект 3:4 сохраняется. Три таких в ряд дают картинку 900x400 (решение
+# пользователя).
+PHOTO_TILE_SIZE = (300, 400)
 
 
-def _resize_photo(data: bytes) -> bytes:
-    """Уменьшает фото до PHOTO_TARGET_SIZE с сохранением пропорций. При любой
-    ошибке обработки возвращает исходник — уведомление важнее картинки."""
-    try:
-        image = Image.open(io.BytesIO(data)).convert("RGB")
-        image.thumbnail(PHOTO_TARGET_SIZE, Image.LANCZOS)
-        buf = io.BytesIO()
-        image.save(buf, format="JPEG", quality=90)
-        return buf.getvalue()
-    except Exception as exc:  # noqa: BLE001 — деградация до оригинала, не фатально
-        logger.warning("Не удалось уменьшить фото: %s", exc)
-        return data
+def _make_collage(photos: list[bytes]) -> bytes | None:
+    """Склеивает до трёх фото в одну картинку, в ряд слева направо.
+
+    Битые файлы пропускаются: лучше коллаж из двух фото, чем уведомление без
+    картинки вообще. Если не открылось ни одно — None, вызывающий уходит в
+    текстовый фоллбек.
+    """
+    tiles = []
+    for data in photos:
+        try:
+            image = Image.open(io.BytesIO(data)).convert("RGB")
+            # fit, а не thumbnail: тайлы должны быть строго одного размера, иначе
+            # ряд получится «рваным». Исходники WB и так 3:4, кадрировать нечего.
+            tiles.append(ImageOps.fit(image, PHOTO_TILE_SIZE, Image.LANCZOS))
+        except Exception as exc:  # noqa: BLE001 — одно битое фото не повод терять уведомление
+            logger.warning("Не удалось обработать фото для коллажа: %s", exc)
+
+    if not tiles:
+        return None
+
+    tile_w, tile_h = PHOTO_TILE_SIZE
+    canvas = Image.new("RGB", (tile_w * len(tiles), tile_h), "white")
+    for index, tile in enumerate(tiles):
+        canvas.paste(tile, (index * tile_w, 0))
+
+    buf = io.BytesIO()
+    canvas.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()
 
 
 async def _download_photos(urls: list[str]) -> list[bytes]:
@@ -96,39 +117,30 @@ async def _download_photos(urls: list[str]) -> list[bytes]:
     for url in urls:
         data = await _download_photo(url)
         if data is not None:
-            photos.append(_resize_photo(data))
+            photos.append(data)
     return photos
 
 
 async def send_notification(
     bot: Bot, chat_id: int, text: str, photo_urls: list[str], keyboard=None
 ) -> None:
-    """`photo_urls` — 0..N фото карусели (см. cards_cache.photos_json, обычно до 3-х)."""
-    photos = await _download_photos(photo_urls)
+    """`photo_urls` — 0..3 фото карточки, они склеиваются в одну картинку."""
+    collage = _make_collage(await _download_photos(photo_urls))
 
-    if not photos:
+    if collage is None:
         await bot.send_message(chat_id=chat_id, text=text, parse_mode=PARSE_MODE, reply_markup=keyboard)
         return
 
-    if len(photos) == 1:
-        if len(text) <= CAPTION_LIMIT:
-            await bot.send_photo(
-                chat_id=chat_id, photo=photos[0], caption=text, parse_mode=PARSE_MODE, reply_markup=keyboard
-            )
-            return
-        await bot.send_photo(chat_id=chat_id, photo=photos[0])
-    else:
-        if len(text) <= CAPTION_LIMIT:
-            media = [
-                InputMediaPhoto(media=data, caption=text if i == 0 else None, parse_mode=PARSE_MODE)
-                for i, data in enumerate(photos)
-            ]
-            await bot.send_media_group(chat_id=chat_id, media=media)
-            return
-        media = [InputMediaPhoto(media=data) for data in photos]
-        await bot.send_media_group(chat_id=chat_id, media=media)
+    if len(text) <= CAPTION_LIMIT:
+        await bot.send_photo(
+            chat_id=chat_id, photo=collage, caption=text, parse_mode=PARSE_MODE, reply_markup=keyboard
+        )
+        return
 
-    # Фото(-карусель) отдельно, текст следующим сообщением, с пометкой — точный текст из ТЗ.
+    # Подпись не влезла: картинка отдельно, текст следующим сообщением, с пометкой —
+    # точный текст из ТЗ. Кнопки уходят с текстом, а не с картинкой: меню должно
+    # быть под тем сообщением, которое пользователь читает.
+    await bot.send_photo(chat_id=chat_id, photo=collage)
     note = f"Фото пришло отдельным сообщением — текст не поместился в подпись ({len(text)} из {CAPTION_LIMIT} символов)."
     await bot.send_message(
         chat_id=chat_id, text=f"{note}\n\n{text}", parse_mode=PARSE_MODE, reply_markup=keyboard

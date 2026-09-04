@@ -8,16 +8,26 @@ from wbnotify.telegram.sender import send_notification
 class FakeBot:
     def __init__(self):
         self.calls = []
+        self.keyboards = []
 
     async def send_photo(self, chat_id, photo, caption=None, parse_mode=None, reply_markup=None):
         self.calls.append(("send_photo", photo, caption))
+        if reply_markup is not None:
+            self.keyboards.append(reply_markup)
 
-    async def send_media_group(self, chat_id, media):
-        # InputMediaPhoto(media=bytes) заворачивает байты в InputFile — достаём обратно.
-        self.calls.append(("send_media_group", [(m.media.input_file_content, m.caption) for m in media]))
 
     async def send_message(self, chat_id, text, parse_mode=None, reply_markup=None):
         self.calls.append(("send_message", text))
+        if reply_markup is not None:
+            self.keyboards.append(reply_markup)
+
+
+def _size(data: bytes) -> tuple[int, int]:
+    import io
+
+    from PIL import Image
+
+    return Image.open(io.BytesIO(data)).size
 
 
 def _mock_downloads(monkeypatch, url_to_bytes: dict[str, bytes | None]):
@@ -28,47 +38,59 @@ def _mock_downloads(monkeypatch, url_to_bytes: dict[str, bytes | None]):
 
 
 async def test_single_short_caption_sent_directly_with_photo(monkeypatch):
-    _mock_downloads(monkeypatch, {"http://example.com/p.jpg": b"photo-bytes"})
+    _mock_downloads(monkeypatch, {"http://example.com/p.jpg": _jpeg((900, 1200))})
     bot = FakeBot()
     await send_notification(bot, 123, "short caption", photo_urls=["http://example.com/p.jpg"])
-    assert bot.calls == [("send_photo", b"photo-bytes", "short caption")]
+    kind, photo, caption = bot.calls[0]
+    assert (kind, caption) == ("send_photo", "short caption")
+    assert _size(photo) == (300, 400)
 
 
-async def test_carousel_short_caption_sent_as_media_group_on_first_photo(monkeypatch):
-    urls = ["http://example.com/1.jpg", "http://example.com/2.jpg", "http://example.com/3.jpg"]
-    _mock_downloads(monkeypatch, {u: f"bytes-{i}".encode() for i, u in enumerate(urls)})
+async def test_three_photos_are_glued_into_one_image_with_caption(monkeypatch):
+    """Три фото уходят ОДНИМ сообщением-картинкой, а не альбомом — иначе Telegram
+    не даёт прикрепить кнопки."""
+    urls = [f"http://example.com/{i}.jpg" for i in range(3)]
+    _mock_downloads(monkeypatch, {u: _jpeg((900, 1200)) for u in urls})
     bot = FakeBot()
-    await send_notification(bot, 123, "caption text", photo_urls=urls)
+    await send_notification(bot, 123, "caption text", photo_urls=urls, keyboard="KB")
 
-    assert len(bot.calls) == 1
-    kind, media = bot.calls[0]
-    assert kind == "send_media_group"
-    assert media == [(b"bytes-0", "caption text"), (b"bytes-1", None), (b"bytes-2", None)]
+    assert len(bot.calls) == 1, "должно быть ровно одно сообщение"
+    kind, photo, caption = bot.calls[0]
+    assert (kind, caption) == ("send_photo", "caption text")
+    assert _size(photo) == (900, 400), "три плитки 300x400 в ряд"
+    assert bot.keyboards == ["KB"], "кнопки должны уйти вместе с картинкой"
 
 
-async def test_carousel_long_caption_falls_back_to_media_group_then_text_with_note(monkeypatch):
-    urls = ["http://example.com/1.jpg", "http://example.com/2.jpg", "http://example.com/3.jpg"]
-    _mock_downloads(monkeypatch, {u: f"bytes-{i}".encode() for i, u in enumerate(urls)})
+async def test_two_photos_make_narrower_collage(monkeypatch):
+    urls = [f"http://example.com/{i}.jpg" for i in range(2)]
+    _mock_downloads(monkeypatch, {u: _jpeg((900, 1200)) for u in urls})
     bot = FakeBot()
-    long_text = "X" * (CAPTION_LIMIT + 500)
-    await send_notification(bot, 123, long_text, photo_urls=urls)
+    await send_notification(bot, 123, "caption", photo_urls=urls)
+    assert _size(bot.calls[0][1]) == (600, 400)
 
-    assert bot.calls[0][0] == "send_media_group"
-    assert all(caption is None for _, caption in bot.calls[0][1])
 
-    kind, message = bot.calls[1]
+async def test_carousel_long_caption_sends_image_then_text_with_note(monkeypatch):
+    urls = [f"http://example.com/{i}.jpg" for i in range(3)]
+    _mock_downloads(monkeypatch, {u: _jpeg((900, 1200)) for u in urls})
+    bot = FakeBot()
+    long_text = "x" * (CAPTION_LIMIT + 12)
+    await send_notification(bot, 123, long_text, photo_urls=urls, keyboard="KB")
+
+    assert bot.calls[0][0] == "send_photo"
+    assert bot.calls[0][2] is None, "подпись не влезла — картинка уходит без неё"
+    kind, text = bot.calls[1]
     assert kind == "send_message"
-    assert f"({len(long_text)} из {CAPTION_LIMIT} символов)" in message
-    assert message.endswith(long_text)
+    assert text.startswith("Фото пришло отдельным сообщением")
+    assert bot.keyboards[-1] == "KB", "кнопки — под текстом, который читает пользователь"
 
 
 async def test_single_photo_long_caption_falls_back_to_photo_then_text_with_note(monkeypatch):
-    _mock_downloads(monkeypatch, {"http://example.com/p.jpg": b"photo-bytes"})
+    _mock_downloads(monkeypatch, {"http://example.com/p.jpg": _jpeg((900, 1200))})
     bot = FakeBot()
     long_text = "X" * (CAPTION_LIMIT + 500)
     await send_notification(bot, 123, long_text, photo_urls=["http://example.com/p.jpg"])
 
-    assert bot.calls[0] == ("send_photo", b"photo-bytes", None)
+    assert (bot.calls[0][0], bot.calls[0][2]) == ("send_photo", None)
     kind, message = bot.calls[1]
     assert kind == "send_message"
     assert f"({len(long_text)} из {CAPTION_LIMIT} символов)" in message
@@ -83,17 +105,24 @@ async def test_no_photos_sends_plain_message(monkeypatch):
 
 
 async def test_one_broken_photo_in_carousel_is_skipped_not_fatal(monkeypatch):
-    """Ровно ситуация, пойманная на реальном чате: одно фото из трёх не скачалось
-    (Telegram/сеть вернули ошибку на конкретный URL) — остальные два всё равно
-    должны уйти каруселью, а не завалить всё уведомление."""
-    urls = ["http://example.com/1.jpg", "http://example.com/2.jpg", "http://example.com/3.jpg"]
-    _mock_downloads(monkeypatch, {urls[0]: b"bytes-0", urls[1]: None, urls[2]: b"bytes-2"})
+    """Не скачалось одно фото из трёх — коллаж собирается из оставшихся двух."""
+    urls = [f"http://example.com/{i}.jpg" for i in range(3)]
+    _mock_downloads(
+        monkeypatch,
+        {urls[0]: _jpeg((900, 1200)), urls[1]: None, urls[2]: _jpeg((900, 1200))},
+    )
     bot = FakeBot()
     await send_notification(bot, 123, "caption", photo_urls=urls)
+    assert _size(bot.calls[0][1]) == (600, 400)
 
-    kind, media = bot.calls[0]
-    assert kind == "send_media_group"
-    assert media == [(b"bytes-0", "caption"), (b"bytes-2", None)]
+
+async def test_corrupted_photo_bytes_are_skipped(monkeypatch):
+    """Скачалось, но файл битый — плитка пропускается, уведомление уходит."""
+    urls = [f"http://example.com/{i}.jpg" for i in range(2)]
+    _mock_downloads(monkeypatch, {urls[0]: b"not-an-image", urls[1]: _jpeg((900, 1200))})
+    bot = FakeBot()
+    await send_notification(bot, 123, "caption", photo_urls=urls)
+    assert _size(bot.calls[0][1]) == (300, 400)
 
 
 async def test_all_photos_broken_falls_back_to_text_only(monkeypatch):
@@ -112,21 +141,6 @@ def _jpeg(size: tuple[int, int]) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", size, "white").save(buf, format="JPEG")
     return buf.getvalue()
-
-
-def test_resize_photo_shrinks_to_450x600_keeping_aspect():
-    """Исходник WB — 900x1200 (3:4), уменьшаем ровно вчетверо, аспект сохраняем."""
-    import io
-
-    from PIL import Image
-
-    out = sender._resize_photo(_jpeg((900, 1200)))
-    assert Image.open(io.BytesIO(out)).size == (450, 600)
-
-
-def test_resize_photo_returns_original_on_broken_bytes():
-    """Битое фото не должно ронять отправку — деградируем до исходных байт."""
-    assert sender._resize_photo(b"not-an-image") == b"not-an-image"
 
 
 def test_render_takes_three_photos_from_card(conn):

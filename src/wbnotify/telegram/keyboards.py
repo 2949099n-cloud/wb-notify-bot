@@ -26,22 +26,17 @@ def parse_callback(data: str) -> tuple[str, int, int, str]:
 
 
 def notification_keyboard(shop_id: int, nm_id: int, event_type: str, tech_size: str | None) -> InlineKeyboardMarkup:
-    """Кнопки под уведомлением. «На WB» — обычная URL-кнопка, серверная логика ей
-    не нужна; остальные приходят колбэком в процесс бота."""
+    """Две кнопки под уведомлением (решение пользователя): «На WB» — обычная
+    URL-кнопка, серверная логика ей не нужна; «Остатки подробно» приходит
+    колбэком в процесс бота.
+
+    ACTION_MUTE/ACTION_APPEARANCE отсюда убраны, но обработчики в bot.py
+    оставлены: под уже отправленными уведомлениями эти кнопки ещё висят и
+    должны продолжать работать.
+    """
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton("📦 Остатки подробно", callback_data=build_callback(ACTION_STOCKS, shop_id, nm_id)),
-                InlineKeyboardButton("🛒 На WB", url=WB_CARD_URL.format(nm_id=nm_id)),
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔕 Не показывать такие",
-                    callback_data=build_callback(ACTION_MUTE, shop_id, nm_id, event_type),
-                ),
-                InlineKeyboardButton(
-                    "⚙️ Внешний вид", callback_data=build_callback(ACTION_APPEARANCE, shop_id, nm_id)
-                ),
-            ],
+            [InlineKeyboardButton("🛒 На WB", url=WB_CARD_URL.format(nm_id=nm_id))],
+            [InlineKeyboardButton("📦 Остатки подробно", callback_data=build_callback(ACTION_STOCKS, shop_id, nm_id))],
         ]
     )

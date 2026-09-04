@@ -213,3 +213,24 @@ def test_start_notifying_does_not_move_existing_mark(conn):
     jobs._start_notifying(conn, shop_id)
 
     assert conn.execute("SELECT notify_from FROM shops WHERE id=?", (shop_id,)).fetchone()[0] == "2026-01-01T00:00:00+00:00"
+
+
+async def test_already_synced_shop_without_mark_starts_notifying(conn, monkeypatch):
+    """Кабинет, который давно синкается, но отсечку так и не получил, тоже
+    должен заговорить: включение рассылки НЕ привязано к первому запуску.
+
+    Поймано вживую: shop_id=2 синкался часами и молчал, потому что включение
+    висело на признаке «карточек ещё нет».
+    """
+    from wbnotify.scheduler import jobs
+
+    shop_id = _insert_shop(conn, notify_from=None)
+    # У кабинета уже есть карточки — первым запуском он не считается.
+    conn.execute(
+        "INSERT INTO cards_cache (shop_id, nm_id, refreshed_at) VALUES (?, 1, ?)", (shop_id, utcnow())
+    )
+    conn.commit()
+    assert jobs._has_cards(conn, shop_id)
+
+    jobs._start_notifying(conn, shop_id)
+    assert conn.execute("SELECT notify_from FROM shops WHERE id=?", (shop_id,)).fetchone()[0] is not None

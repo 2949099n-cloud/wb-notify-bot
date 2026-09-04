@@ -51,8 +51,7 @@ async def poll_and_notify(config: Config) -> None:
                 # имеет карточек: они синкаются раз в сутки. Без них уведомление
                 # уйдёт без названия товара, фото, артикула и остатков — поэтому
                 # первый раз догоняем суточные шаги сразу, не дожидаясь ночи.
-                first_run = not _has_cards(conn, shop.id)
-                if first_run:
+                if not _has_cards(conn, shop.id):
                     logger.info("shop_id=%s: карточек нет — первичный суточный синк", shop.id)
                     await sync_shop_daily(conn, shop, config.token_encryption_key)
 
@@ -63,8 +62,10 @@ async def poll_and_notify(config: Config) -> None:
 
                 events = classify_shop_events(conn, shop.id)
                 new_events = sum(len(v) for v in events.values())
-                if first_run:
-                    _start_notifying(conn, shop.id)
+                # Не привязано к first_run: кабинет мог синкаться часами и всё
+                # это время молчать, если отсечку так и не выставили руками
+                # (поймано вживую на shop_id=2). Вызов идемпотентен.
+                _start_notifying(conn, shop.id)
                 sent = await drain_queue_for_shop(conn, bot, shop, limit=DRAIN_LIMIT_PER_CYCLE)
                 logger.info("shop_id=%s: новых событий=%d, отправлено=%d", shop.id, new_events, sent)
             except TelegramError as exc:

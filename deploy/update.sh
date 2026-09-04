@@ -28,14 +28,21 @@ systemctl restart wbnotify wbnotify-bot
 
 # Служебный бот владельца — только если для него задан токен. Без токена процесс
 # сразу упал бы, и systemd крутил бы его в бесконечном рестарте.
+SERVICES="wbnotify wbnotify-bot"
 if grep -qE '^TELEGRAM_ADMIN_BOT_TOKEN=.+' .env; then
   systemctl enable --now wbnotify-admin
   systemctl restart wbnotify-admin
+  SERVICES="$SERVICES wbnotify-admin"
 else
   systemctl disable --now wbnotify-admin 2>/dev/null || true
   echo "TELEGRAM_ADMIN_BOT_TOKEN не задан — служебный бот не запускается"
 fi
 
 sleep 3
-systemctl is-active wbnotify wbnotify-bot
+# Статус ПО КАЖДОМУ сервису с именем: голый список из «active active» не
+# показывал, какой процесс какой, и пропущенный третий было не заметить.
+for unit in $SERVICES; do
+  printf '%-16s %s
+' "$unit" "$(systemctl is-active "$unit")"
+done
 echo "Готово. Логи: journalctl -u wbnotify -u wbnotify-bot -u wbnotify-admin -f"

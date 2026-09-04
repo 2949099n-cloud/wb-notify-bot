@@ -44,6 +44,39 @@ CREATE TABLE IF NOT EXISTS shop_alerts (
   sent_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS bot_users (
+  telegram_user_id INTEGER PRIMARY KEY,
+  display_name TEXT NOT NULL,            -- по умолчанию имя из Telegram, можно переименовать в «Профиле»
+  chat_id INTEGER,                       -- личный чат пользователя с ботом
+  created_at TEXT NOT NULL
+);
+
+-- Доступ к кабинету: владелец (тот, кто подключил) и приглашённые менеджеры.
+-- Строка владельца заводится автоматически при регистрации магазина, см. _backfill_owners.
+CREATE TABLE IF NOT EXISTS shop_members (
+  id INTEGER PRIMARY KEY,
+  shop_id INTEGER NOT NULL REFERENCES shops(id),
+  telegram_user_id INTEGER NOT NULL,
+  telegram_chat_id INTEGER NOT NULL,     -- куда слать уведомления ИМЕННО этому участнику
+  role TEXT NOT NULL CHECK(role IN ('owner','manager')),
+  added_at TEXT NOT NULL,
+  UNIQUE(shop_id, telegram_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_members_user ON shop_members(telegram_user_id);
+
+-- Одноразовые приглашения в кабинет. Ссылка вида t.me/<bot>?start=inv_<token>.
+CREATE TABLE IF NOT EXISTS shop_invites (
+  id INTEGER PRIMARY KEY,
+  shop_id INTEGER NOT NULL REFERENCES shops(id),
+  token TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL CHECK(role IN ('manager')),
+  created_by INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  used_by INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS sync_cursors (
   shop_id INTEGER NOT NULL REFERENCES shops(id),
   endpoint TEXT NOT NULL CHECK(endpoint IN ('orders','sales','stocks','cards','tariffs')),
@@ -314,12 +347,27 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _backfill_owners(conn: sqlite3.Connection) -> None:
+    """Заводит строку владельца в shop_members для магазинов, подключённых до
+    появления таблицы. Без неё уведомления по таким магазинам никому не уйдут:
+    рассылка ходит по участникам, а не по shops.telegram_chat_id."""
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO shop_members (shop_id, telegram_user_id, telegram_chat_id, role, added_at)
+        SELECT id, owner_user_id, telegram_chat_id, 'owner', ? FROM shops
+        """,
+        (utcnow(),),
+    )
+    conn.commit()
+
+
 def init_db(db_path: str) -> None:
     conn = connect(db_path)
     try:
         conn.executescript(SCHEMA)
         conn.commit()
         _migrate(conn)
+        _backfill_owners(conn)
     finally:
         conn.close()
 

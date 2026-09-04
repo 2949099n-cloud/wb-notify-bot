@@ -36,6 +36,7 @@ from telegram.request import HTTPXRequest
 from wbnotify.counters import now_msk
 from wbnotify.db import utcnow
 from wbnotify.sync.cards_sync import CAROUSEL_PHOTOS
+from wbnotify import members_repo
 from wbnotify.models import ShopRow
 from wbnotify.telegram.keyboards import notification_keyboard
 from wbnotify.telegram.formatters import (
@@ -221,17 +222,21 @@ async def drain_queue_for_shop(conn: sqlite3.Connection, bot: Bot, shop: ShopRow
     #    показать как раз надо.
     max_age_cutoff = (now_msk().date() - timedelta(days=MAX_EVENT_AGE_DAYS)).isoformat()
 
-    # Замьюченные типы событий просто не выбираются. Строки остаются pending и
-    # уходят из выборки сами, когда выпадут из окна давности — отдельный статус
-    # «muted» заводить не стали, чтобы не перестраивать таблицу ради этого.
+    # Получатели — все участники кабинета: владелец и приглашённые менеджеры.
+    # Пусто быть не должно (строка владельца заводится при регистрации и
+    # бэкфилом в db._backfill_owners), но если вдруг — падаем на chat_id
+    # магазина, чтобы уведомления не потерялись молча.
+    recipients = members_repo.recipient_chats(conn, shop.id) or [shop.telegram_chat_id]
+
+    # Мьюты применяются НЕ в запросе, а при отправке: у разных участников
+    # кабинета они разные, а строка очереди одна на событие.
+    muted = _muted_by_chat(conn, shop.id, recipients)
+
     query = (
         "SELECT * FROM notification_queue WHERE shop_id = ? AND status = 'pending' "
-        "AND created_at >= ? AND (event_date IS NULL OR event_date >= ?) "
-        "AND event_type NOT IN ("
-        "  SELECT event_type FROM chat_mutes WHERE chat_id = ? AND (shop_id IS NULL OR shop_id = ?)"
-        ") ORDER BY id"
+        "AND created_at >= ? AND (event_date IS NULL OR event_date >= ?) ORDER BY id"
     )
-    params: list = [shop.id, notify_from, max_age_cutoff, shop.telegram_chat_id, shop.id]
+    params: list = [shop.id, notify_from, max_age_cutoff]
     if limit is not None:
         query += " LIMIT ?"
         params.append(limit)
@@ -239,6 +244,13 @@ async def drain_queue_for_shop(conn: sqlite3.Connection, bot: Bot, shop: ShopRow
 
     sent = 0
     for row in rows:
+        targets = [chat for chat in recipients if row["event_type"] not in muted.get(chat, set())]
+        if not targets:
+            # Событие замьючено у всех получателей. Строку не трогаем: она
+            # останется pending и уйдёт из выборки сама, когда выпадет из окна
+            # давности — отдельный статус «muted» заводить не стали.
+            continue
+
         try:
             text, photo_urls = _render(conn, shop, row)
             ref_row = conn.execute(
@@ -247,13 +259,26 @@ async def drain_queue_for_shop(conn: sqlite3.Connection, bot: Bot, shop: ShopRow
             keyboard = notification_keyboard(
                 shop.id, ref_row["nm_id"], row["event_type"], ref_row["tech_size"]
             )
-            await send_notification(bot, shop.telegram_chat_id, text, photo_urls, keyboard)
-        except (LookupError, ValueError, TelegramError) as exc:
-            logger.error("notification_queue id=%s: ошибка отправки: %s", row["id"], exc)
-            conn.execute(
-                "UPDATE notification_queue SET status='failed', error=? WHERE id=?", (str(exc), row["id"])
-            )
-            conn.commit()
+        except (LookupError, ValueError) as exc:
+            logger.error("notification_queue id=%s: не удалось собрать сообщение: %s", row["id"], exc)
+            _mark_failed(conn, row["id"], exc)
+            continue
+
+        delivered = 0
+        last_error: Exception | None = None
+        for chat_id in targets:
+            try:
+                await send_notification(bot, chat_id, text, photo_urls, keyboard)
+            except TelegramError as exc:
+                # Один недоступный чат (менеджер заблокировал бота) не должен
+                # лишать уведомления остальных участников.
+                logger.error("notification_queue id=%s: чат %s: %s", row["id"], chat_id, exc)
+                last_error = exc
+            else:
+                delivered += 1
+
+        if delivered == 0:
+            _mark_failed(conn, row["id"], last_error)
             continue
 
         conn.execute(
@@ -263,3 +288,25 @@ async def drain_queue_for_shop(conn: sqlite3.Connection, bot: Bot, shop: ShopRow
         sent += 1
 
     return sent
+
+
+def _muted_by_chat(conn: sqlite3.Connection, shop_id: int, chats: list[int]) -> dict[int, set[str]]:
+    if not chats:
+        return {}
+    placeholders = ",".join("?" * len(chats))
+    rows = conn.execute(
+        f"SELECT chat_id, event_type FROM chat_mutes WHERE chat_id IN ({placeholders}) "
+        "AND (shop_id IS NULL OR shop_id = ?)",
+        [*chats, shop_id],
+    ).fetchall()
+    muted: dict[int, set[str]] = {}
+    for row in rows:
+        muted.setdefault(row["chat_id"], set()).add(row["event_type"])
+    return muted
+
+
+def _mark_failed(conn: sqlite3.Connection, queue_id: int, exc: Exception | None) -> None:
+    conn.execute(
+        "UPDATE notification_queue SET status='failed', error=? WHERE id=?", (str(exc), queue_id)
+    )
+    conn.commit()

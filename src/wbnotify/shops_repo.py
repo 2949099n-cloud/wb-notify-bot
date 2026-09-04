@@ -7,6 +7,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 from wbnotify.db import utcnow as _now
+from wbnotify import members_repo
 from wbnotify.models import ShopRow
 from wbnotify.security.tokens import decrypt_token, encrypt_token
 from wbnotify.wb_api.client import WBAuthError, WBError, ping, seller_info
@@ -66,7 +67,60 @@ async def register_shop(
     )
     conn.commit()
     shop_id = cursor.lastrowid
+    # Владелец сразу становится участником кабинета: рассылка ходит по
+    # shop_members, а не по shops.telegram_chat_id (см. members_repo).
+    members_repo.add_owner(conn, shop_id, owner_user_id, telegram_chat_id)
     return get_shop(conn, shop_id)
+
+
+async def replace_token(conn: sqlite3.Connection, shop_id: int, raw_token: str, enc_key: str) -> ShopRow:
+    """Меняет WB-токен уже подключённого кабинета.
+
+    Старый токен затирается только ПОСЛЕ успешной живой проверки нового — иначе
+    неудачная замена оставила бы кабинет вообще без рабочего токена. Заодно
+    снимается token_status='invalid', если кабинет был отключён из-за 401.
+    """
+    try:
+        await ping(raw_token)
+    except WBAuthError as exc:
+        raise InvalidTokenError("Токен недействителен (WB API вернул 401 Unauthorized)") from exc
+    except WBError as exc:
+        raise InvalidTokenError(f"Не удалось проверить токен через WB API: {exc}") from exc
+
+    now = _now()
+    conn.execute(
+        """
+        UPDATE shops SET wb_api_token_encrypted = ?, token_status = 'active',
+                         token_checked_at = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (encrypt_token(raw_token, enc_key), now, now, shop_id),
+    )
+    conn.commit()
+    return get_shop(conn, shop_id)
+
+
+def revoke_token(conn: sqlite3.Connection, shop_id: int) -> None:
+    """Помечает токен недействительным на нашей стороне: опрос кабинета
+    останавливается (is_shop_active), уведомления перестают приходить.
+
+    Сам токен в личном кабинете WB этим НЕ отзывается — у WB API нет метода
+    отзыва чужого токена, это делается руками в разделе «Доступ к API».
+    """
+    mark_token_invalid(conn, shop_id)
+
+
+def deactivate_shop(conn: sqlite3.Connection, shop_id: int) -> None:
+    """Мягкое удаление кабинета: опрос прекращается, история заказов остаётся.
+
+    Физически строки не удаляем — на них ссылаются orders/sales/очередь, а
+    shops.id по правилу проекта не переиспользуется, так что «воскресить»
+    кабинет удалением флага нельзя и не нужно: подключение заводит новый id.
+    """
+    now = _now()
+    conn.execute("UPDATE shops SET is_active = 0, updated_at = ? WHERE id = ?", (now, shop_id))
+    conn.execute("DELETE FROM shop_members WHERE shop_id = ?", (shop_id,))
+    conn.commit()
 
 
 def get_shop(conn: sqlite3.Connection, shop_id: int) -> ShopRow:

@@ -23,7 +23,7 @@ from telegram.ext import (
 )
 from telegram.request import HTTPXRequest
 
-from wbnotify import members_repo, shops_repo
+from wbnotify import admin_alerts, members_repo, shops_repo
 from wbnotify.config import Config
 from wbnotify.db import db_session
 from wbnotify.telegram import admin, admin_notifier, menu
@@ -201,11 +201,30 @@ async def _do_support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # Обращение уходит служебным ботом, если он настроен: у владельца в этом
     # боте своя лента заказов, и поддержка вперемешку с ней нечитаема.
     admin_bot = admin_notifier.make_admin_bot(config) or context.bot
-    sent = await admin_bot.send_message(
-        chat_id=config.telegram_admin_chat_id,
-        text=f"{header}\n\n{update.message.text}",
-        parse_mode=PARSE_MODE,
-    )
+    text = f"{header}\n\n{update.message.text}"
+
+    try:
+        sent = await admin_bot.send_message(
+            chat_id=config.telegram_admin_chat_id, text=text, parse_mode=PARSE_MODE
+        )
+    except TelegramError as exc:
+        # Служебный бот может лежать (был реальный случай: неверный токен и
+        # рестарт-цикл). Обращение НЕ теряем — кладём в очередь алертов, её
+        # разбирает планировщик, как только связь восстановится.
+        logger.error("Обращение в поддержку не ушло сразу, откладываем: %s", exc)
+        with db_session(config.db_path) as conn:
+            admin_alerts.queue(
+                conn,
+                "support",
+                text,
+                payload={"user_id": user_id, "chat_id": update.effective_chat.id},
+            )
+        await update.message.reply_text(
+            "✅ Обращение принято. Связь с поддержкой сейчас восстанавливается — "
+            "передам его, как только она появится. Ответ придёт сюда же."
+        )
+        return
+
     with db_session(config.db_path) as conn:
         admin.remember_thread(conn, sent.message_id, user_id, update.effective_chat.id)
 

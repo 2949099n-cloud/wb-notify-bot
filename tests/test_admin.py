@@ -198,3 +198,57 @@ def test_summary_lists_only_problem_shops(conn):
     assert "Требуют внимания" in text
     assert "Сбойный" in text
     assert "Рабочий" not in text
+
+
+async def test_support_message_is_not_lost_when_admin_bot_is_down(conn, tmp_path, monkeypatch):
+    """Реальный случай: служебный бот падал по кругу из-за кривого токена, и
+    обращения пользователей исчезали бесследно — ни у владельца, ни в базе."""
+    from telegram.error import TelegramError
+
+    from wbnotify.telegram import admin_notifier, bot as bot_module
+
+    _shop(conn)
+    config = _config(str(tmp_path / "x.db"))
+    object.__setattr__(config, "db_path", conn.execute("PRAGMA database_list").fetchone()[2])
+
+    class DeadBot:
+        async def send_message(self, **kwargs):
+            raise TelegramError("Unauthorized")
+
+    monkeypatch.setattr(admin_notifier, "make_admin_bot", lambda cfg: DeadBot())
+
+    replies = []
+    update = SimpleNamespace(
+        message=SimpleNamespace(text="не приходят уведомления", reply_text=AsyncMock()),
+        effective_user=SimpleNamespace(id=OWNER_ID),
+        effective_chat=SimpleNamespace(id=OWNER_CHAT),
+    )
+    context = SimpleNamespace(bot_data={"config": config}, bot=None, user_data={})
+
+    await bot_module._do_support(update, context)
+
+    queued = [a for a in admin_alerts.pending(conn) if a["kind"] == "support"]
+    assert len(queued) == 1, "обращение должно лечь в очередь, а не пропасть"
+    assert "не приходят уведомления" in queued[0]["text"]
+    assert admin_alerts.payload_of(queued[0]) == {"user_id": OWNER_ID, "chat_id": OWNER_CHAT}
+    update.message.reply_text.assert_awaited_once()
+    assert "принято" in update.message.reply_text.await_args.args[0]
+
+
+async def test_deferred_support_message_remembers_who_to_answer(conn, tmp_path):
+    """После доставки отложенного обращения ответ реплаем должен находить автора."""
+    from wbnotify.scheduler.jobs import flush_admin_alerts
+
+    admin_alerts.queue(
+        conn, "support", "🆘 Обращение\nтекст", payload={"user_id": OWNER_ID, "chat_id": OWNER_CHAT}
+    )
+
+    class Bot:
+        async def send_message(self, chat_id, text, parse_mode=None):
+            return SimpleNamespace(message_id=777)
+
+    sent = await flush_admin_alerts(conn, Bot(), _config(str(tmp_path / "x.db")))
+
+    assert sent == 1
+    thread = admin.thread_by_message(conn, 777)
+    assert (thread["user_id"], thread["chat_id"]) == (OWNER_ID, OWNER_CHAT)

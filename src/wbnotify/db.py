@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS admin_alerts (
   kind TEXT NOT NULL,
   shop_id INTEGER,                       -- может быть NULL: удаление аккаунта не привязано к кабинету
   text TEXT NOT NULL,
+  payload_json TEXT,                     -- для отложенных обращений: кому потом отвечать
   created_at TEXT NOT NULL,
   sent_at TEXT
 );
@@ -358,6 +359,7 @@ _COLUMN_MIGRATIONS = [
     ("shops", "notify_from", "TEXT"),
     ("notification_queue", "event_date", "TEXT"),
     ("bot_users", "username", "TEXT"),
+    ("admin_alerts", "payload_json", "TEXT"),
 ]
 
 

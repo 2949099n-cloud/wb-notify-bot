@@ -9,6 +9,7 @@ shop_id, а часть событий (удаление аккаунта) к к�
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from wbnotify.db import utcnow
@@ -20,15 +21,31 @@ KINDS = {
     "token_revoked": "🔕 Токен отозван",
     "shop_deleted": "🗑 Кабинет удалён",
     "account_deleted": "🗑 Аккаунт удалён",
+    # Обращение, которое не удалось передать сразу (служебный бот был недоступен).
+    "support": "⏳ Доставлено с задержкой",
 }
 
 
-def queue(conn: sqlite3.Connection, kind: str, text: str, shop_id: int | None = None) -> None:
+def queue(
+    conn: sqlite3.Connection,
+    kind: str,
+    text: str,
+    shop_id: int | None = None,
+    payload: dict | None = None,
+) -> None:
+    """`payload` нужен отложенным обращениям в поддержку: чтобы ответить автору,
+    при отправке надо знать, кто писал — а связь «сообщение → автор» создаётся
+    только в момент реальной отправки владельцу."""
     conn.execute(
-        "INSERT INTO admin_alerts (kind, shop_id, text, created_at) VALUES (?, ?, ?, ?)",
-        (kind, shop_id, text, utcnow()),
+        "INSERT INTO admin_alerts (kind, shop_id, text, payload_json, created_at) VALUES (?, ?, ?, ?, ?)",
+        (kind, shop_id, text, json.dumps(payload, ensure_ascii=False) if payload else None, utcnow()),
     )
     conn.commit()
+
+
+def payload_of(alert: sqlite3.Row) -> dict:
+    raw = alert["payload_json"] if "payload_json" in alert.keys() else None
+    return json.loads(raw) if raw else {}
 
 
 def pending(conn: sqlite3.Connection, limit: int = 20) -> list[sqlite3.Row]:

@@ -24,6 +24,7 @@ from wbnotify.telegram import admin_notifier
 from wbnotify.events.classify import classify_shop_events
 from wbnotify.sync import sync_all_active_shops, sync_shop_daily, sync_shop_frequent
 from wbnotify.sync.tariffs_sync import sync_tariffs
+from wbnotify.telegram.formatters import PARSE_MODE
 from wbnotify.telegram.sender import drain_queue_for_shop, make_bot
 from wbnotify.wb_api.client import WBError
 
@@ -96,13 +97,27 @@ async def flush_admin_alerts(conn, bot, config: Config) -> int:
     if config.telegram_admin_chat_id is None:
         return 0
 
+    from wbnotify.telegram import admin
+
     sent = 0
     for alert in admin_alerts.pending(conn):
         try:
-            await bot.send_message(chat_id=config.telegram_admin_chat_id, text=admin_alerts.render(alert))
+            message = await bot.send_message(
+                chat_id=config.telegram_admin_chat_id,
+                text=admin_alerts.render(alert),
+                parse_mode=PARSE_MODE,
+            )
         except TelegramError as exc:
             logger.error("Не удалось отправить алерт админу (id=%s): %s", alert["id"], exc)
             break  # чат недоступен — остальные тоже не уйдут, попробуем в следующем цикле
+
+        # Отложенное обращение: связь «сообщение владельцу → автор» создаётся
+        # только сейчас, при реальной отправке — иначе ответ реплаем будет некому
+        # доставить.
+        payload = admin_alerts.payload_of(alert)
+        if alert["kind"] == "support" and payload:
+            admin.remember_thread(conn, message.message_id, payload["user_id"], payload["chat_id"])
+
         admin_alerts.mark_sent(conn, alert["id"])
         sent += 1
     return sent

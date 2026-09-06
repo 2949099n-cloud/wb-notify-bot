@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
@@ -34,6 +35,26 @@ class Config:
     daily_summary_hour_msk: int = 9
 
 
+# Формат токена бота: <id бота>:<секрет>. Двоеточие ровно одно.
+_TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{30,}$")
+
+
+def _check_token(value: str, key: str) -> str:
+    """Ругается ПОНЯТНО и без показа самого токена.
+
+    Реальный случай с сервера: при копировании из BotFather к токену прилипло
+    время сообщения («…MncOPOQ21:07»), и процесс падал в бесконечном рестарте с
+    трейсбеком `InvalidToken`, где токен ещё и печатался в журнал целиком.
+    """
+    if not _TOKEN_RE.match(value.strip()):
+        raise ConfigError(
+            f"{key}: неверный формат токена. Ожидается «цифры:35+ символов», двоеточие одно. "
+            "Чаще всего при копировании из BotFather прилипает лишнее — время сообщения "
+            "или пробел. Проверьте начало и конец строки в .env"
+        )
+    return value.strip()
+
+
 def _require(env: dict, key: str) -> str:
     value = env.get(key)
     if not value:
@@ -46,12 +67,15 @@ def load_config(env_file: str | None = None) -> Config:
     env = os.environ
 
     admin_chat_id_raw = env.get("TELEGRAM_ADMIN_CHAT_ID")
+    admin_bot_token_raw = (env.get("TELEGRAM_ADMIN_BOT_TOKEN") or "").strip()
 
     return Config(
-        telegram_bot_token=_require(env, "TELEGRAM_BOT_TOKEN"),
+        telegram_bot_token=_check_token(_require(env, "TELEGRAM_BOT_TOKEN"), "TELEGRAM_BOT_TOKEN"),
         token_encryption_key=_require(env, "TOKEN_ENCRYPTION_KEY"),
         telegram_admin_chat_id=int(admin_chat_id_raw) if admin_chat_id_raw else None,
-        telegram_admin_bot_token=env.get("TELEGRAM_ADMIN_BOT_TOKEN") or None,
+        telegram_admin_bot_token=(
+            _check_token(admin_bot_token_raw, "TELEGRAM_ADMIN_BOT_TOKEN") if admin_bot_token_raw else None
+        ),
         # 5 минут: уведомления должны приходить постепенно, а не пачкой раз в
         # полчаса. Лимиты WB это позволяют — /orders и /sales по 1 запросу/мин.
         poll_interval_minutes=int(env.get("POLL_INTERVAL_MINUTES", "5")),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 from wbnotify.calc.metrics import (
     buyout_rate_with_returns,
@@ -260,9 +261,15 @@ def test_stock_days_by_warehouse_per_warehouse_breakdown(conn):
         (SHOP_ID, NM_ID, utcnow()),
     )
     conn.commit()
-    # 2 заказа со Склада А за последние 7 дней, ни одного со Склада Б
-    _insert_order(conn, "wa-1", "2026-08-30T10:00:00", warehouse_name="Склад А")
-    _insert_order(conn, "wa-2", "2026-08-29T10:00:00", warehouse_name="Склад А")
+    # 2 заказа со Склада А за последние 7 дней, ни одного со Склада Б.
+    # Даты — ОТНОСИТЕЛЬНО сегодняшнего дня: окно у stock_days_by_warehouse
+    # отсчитывается от «сейчас», и с фиксированными датами тест ломался сам собой,
+    # когда календарь доезжал до края окна (поймано 06.09.2026).
+    from wbnotify.counters import now_msk
+
+    today = now_msk().date()
+    _insert_order(conn, "wa-1", f"{today - timedelta(days=1)}T10:00:00", warehouse_name="Склад А")
+    _insert_order(conn, "wa-2", f"{today - timedelta(days=2)}T10:00:00", warehouse_name="Склад А")
 
     result = stock_days_by_warehouse(conn, SHOP_ID, NM_ID, SIZE, windows=(7,))
     by_name = {r["warehouse_name"]: r for r in result}

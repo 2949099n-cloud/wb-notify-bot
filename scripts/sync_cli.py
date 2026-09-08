@@ -126,6 +126,49 @@ def cmd_resync(args) -> int:
     return 0
 
 
+def cmd_compare(args) -> int:
+    """Сверка «сколько заказов у WB» по трём источникам за один день.
+
+    Нужна, когда в отчёте кабинета заказов больше, чем пришло уведомлений: у WB
+    два источника с РАЗНЫМИ цифрами, и уведомления можно строить только по
+    первому — только в нём есть отдельные заказы (время, размер, цена, склад).
+    Воронка отдаёт лишь суточные итоги по артикулу.
+    """
+    from wbnotify.wb_api.analytics import get_sales_funnel
+    from wbnotify.wb_api.orders import get_orders
+
+    config = load_config()
+    with db_session(config.db_path) as conn:
+        shop = shops_repo.get_shop(conn, args.shop_id)
+        token = shops_repo.get_decrypted_token(conn, args.shop_id, config.token_encryption_key)
+        in_db = conn.execute(
+            "SELECT COUNT(*) FROM orders WHERE shop_id = ? AND substr(date,1,10) = ?",
+            (args.shop_id, args.date),
+        ).fetchone()[0]
+
+    async def fetch():
+        rows = await get_orders(token, args.date, flag=1)
+        funnel = await get_sales_funnel(token, args.date)
+        return rows, funnel
+
+    rows, funnel = asyncio.run(fetch())
+    funnel_count = sum(
+        (p.get("statistic", {}).get("selected", {}) or {}).get("orderCount", 0) for p in funnel
+    )
+
+    print(f"Кабинет «{shop.name}», день {args.date}:")
+    print(f"  API заказов (statistics /orders): {len(rows)}")
+    print(f"  Воронка продаж (аналитика WB):    {funnel_count}")
+    print(f"  У нас в базе:                     {in_db}")
+    if len(rows) != in_db:
+        print("  → расходится НАША база с API — это наш баг, присылайте вывод")
+    elif funnel_count > len(rows):
+        print("  → у WB два источника расходятся между собой; уведомления строятся")
+        print("    по первому, в воронке отдельных заказов нет. Часть заказов WB")
+        print("    публикует в /orders с задержкой — они догонятся следующим синком.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -149,6 +192,11 @@ def main() -> int:
     p_resync.add_argument("--shop-id", type=int, required=True)
     p_resync.add_argument("--days", type=int, default=3)
     p_resync.set_defaults(func=cmd_resync)
+
+    p_compare = sub.add_parser("compare", help="Сверить число заказов за день: API, воронка, наша база")
+    p_compare.add_argument("--shop-id", type=int, required=True)
+    p_compare.add_argument("--date", required=True, help="День в МСК, ГГГГ-ММ-ДД")
+    p_compare.set_defaults(func=cmd_compare)
 
     args = parser.parse_args()
     try:

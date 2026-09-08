@@ -79,22 +79,38 @@ async def _run_shop_sync(conn: sqlite3.Connection, shop: ShopRow, enc_key: str, 
     соединении. Не нарушайте этот инвариант.
     """
     token = shops_repo.get_decrypted_token(conn, shop.id, enc_key)
-    result: dict = {"shop_id": shop.id, "error": None}
+    result: dict = {"shop_id": shop.id, "error": None, "failed_steps": {}}
     result.update({step: 0 for step in steps})
-    try:
-        for step in steps:
-            step_func = globals()[_STEP_FUNC_NAMES[step]]
+
+    # КАЖДЫЙ шаг в своём try. Раньше try был один на весь цикл, и первый же сбой
+    # обрывал остальные шаги: у кабинета с урезанным токеном «stocks» отдавал 403,
+    # и до «fbs»/«funnel» дело не доходило, а вызывающий по флагу ошибки пропускал
+    # ещё и классификацию — заказы копились в БД и не превращались в уведомления
+    # НИКОГДА (поймано вживую: shop_id=3, десятки заказов «НЕТ В ОЧЕРЕДИ»).
+    for step in steps:
+        step_func = globals()[_STEP_FUNC_NAMES[step]]
+        try:
             result[step] = await step_func(conn, shop.id, token)
-    except WBAuthError:
-        logger.warning("shop_id=%s: токен невалиден (401), помечаю invalid", shop.id)
-        shops_repo.mark_token_invalid(conn, shop.id)
-        result["error"] = "invalid_token"
-    except WBError as exc:
-        logger.error("shop_id=%s: ошибка WB API: %s", shop.id, exc)
-        result["error"] = str(exc)
-    except Exception as exc:  # noqa: BLE001 — синк одного магазина не должен ронять остальные
-        logger.exception("shop_id=%s: неожиданная ошибка синка", shop.id)
-        result["error"] = str(exc)
+        except WBAuthError:
+            # 401 — единственная ошибка уровня МАГАЗИНА: токен не работает нигде,
+            # продолжать остальные шаги бессмысленно.
+            logger.warning("shop_id=%s: токен невалиден (401), помечаю invalid", shop.id)
+            shops_repo.mark_token_invalid(conn, shop.id)
+            result["error"] = "invalid_token"
+            return result
+        except WBError as exc:
+            logger.error("shop_id=%s: шаг «%s» не выполнен: %s", shop.id, step, exc)
+            result["failed_steps"][step] = str(exc)
+        except Exception as exc:  # noqa: BLE001 — сбой шага не должен ронять магазин
+            logger.exception("shop_id=%s: неожиданная ошибка на шаге «%s»", shop.id, step)
+            result["failed_steps"][step] = str(exc)
+
+    # Заказы и продажи — источник самих событий. Если не доехали именно они,
+    # уведомлять не по чему и данные неполны; сбой прочих шагов (остатки, FBS,
+    # воронка) лишь обедняет аналитику в карточке, но уведомление показать надо.
+    critical = [step for step in ("orders", "sales") if step in result["failed_steps"]]
+    if critical:
+        result["error"] = "; ".join(f"{step}: {result['failed_steps'][step]}" for step in critical)
     return result
 
 

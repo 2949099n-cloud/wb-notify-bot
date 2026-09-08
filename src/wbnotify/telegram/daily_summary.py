@@ -24,13 +24,18 @@ from telegram import Bot
 from telegram.error import TelegramError
 
 from wbnotify import members_repo
+from wbnotify.calc import day_economics
 from wbnotify.calc.metrics import order_velocity, stock_eta, yesterday_today_breakdown
 from wbnotify.counters import now_msk
 from wbnotify.db import utcnow
 from wbnotify.models import ShopRow
-from wbnotify.telegram.formatters import PARSE_MODE, _esc, _fmt_money
+from wbnotify.telegram.formatters import PARSE_MODE, _esc
+from wbnotify.telegram.keyboards import WB_CARD_URL
 
 TOP_ITEMS = 5
+RULE = "━━━━━━━━━━━━━━━━━━━"
+# Типографский минус: обычный дефис в столбце цифр читается как перенос.
+MINUS = "−"
 # Ниже какого запаса товар попадает в блок «заканчивается».
 LOW_STOCK_DAYS = 7
 LOW_STOCK_ITEMS = 5
@@ -63,22 +68,6 @@ def _cancels(conn: sqlite3.Connection, shop_id: int, date_str: str) -> dict:
         (shop_id, date_str, date_str + "T23:59:59.999999"),
     ).fetchone()
     return {"qty": row[0], "amount": row[1] or 0}
-
-
-def _top_items(conn: sqlite3.Connection, shop_id: int, date_str: str) -> list[sqlite3.Row]:
-    return conn.execute(
-        """
-        SELECT o.nm_id, COUNT(*) AS qty, COALESCE(SUM(o.price_with_disc), 0) AS total,
-               COALESCE(c.name, '') AS name, COALESCE(o.supplier_article, '') AS article
-        FROM orders o
-        LEFT JOIN cards_cache c ON c.shop_id = o.shop_id AND c.nm_id = o.nm_id
-        WHERE o.shop_id = ? AND o.date >= ? AND o.date < ?
-        GROUP BY o.nm_id
-        ORDER BY qty DESC, total DESC
-        LIMIT ?
-        """,
-        (shop_id, date_str, date_str + "T23:59:59.999999", TOP_ITEMS),
-    ).fetchall()
 
 
 def _stock_eta_for_article(conn: sqlite3.Connection, shop_id: int, nm_id: int) -> tuple[int, str]:
@@ -125,38 +114,102 @@ def _low_stock(conn: sqlite3.Connection, shop_id: int) -> list[tuple[sqlite3.Row
     return [(row, qty, days) for row, qty, days in low[:LOW_STOCK_ITEMS]]
 
 
+def _delta_line(current: dict, previous: dict, higher_is_better: bool) -> str:
+    """Строка сравнения с предыдущим днём: «🟢 +5 шт. · 🟢 +20 172 ₽ (+9.2%)».
+
+    Цвет — по смыслу, а не по знаку: рост отмен и возвратов красный, рост
+    заказов и продаж зелёный.
+    """
+    d_qty = current["qty"] - previous["qty"]
+    d_amount = current["amount"] - previous["amount"]
+    pct = (d_amount / previous["amount"] * 100) if previous["amount"] else None
+
+    def mark(value: float) -> str:
+        if value == 0:
+            return "⚪️"
+        good = value > 0 if higher_is_better else value < 0
+        return "🟢" if good else "🔴"
+
+    pct_text = f" ({_signed_pct(pct)})" if pct is not None else ""
+    return f"   {mark(d_qty)} {_signed_qty(d_qty)} · {mark(d_amount)} {_signed_rub(d_amount)}{pct_text}"
+
+
+def _signed_qty(value: float) -> str:
+    return f"{'+' if value > 0 else MINUS if value < 0 else ''}{abs(round(value))} шт."
+
+
+def _signed_rub(value: float) -> str:
+    return f"{'+' if value > 0 else MINUS if value < 0 else ''}{_rub(abs(value))}"
+
+
+def _signed_pct(value: float) -> str:
+    return f"{'+' if value > 0 else MINUS if value < 0 else ''}{abs(value):.1f}%"
+
+
+def _wb_link(nm_id: int) -> str:
+    return f'<a href="{WB_CARD_URL.format(nm_id=nm_id)}">{nm_id}</a>'
+
+
+def _top_lines(title: str, items: list, value_of) -> list[str]:
+    ranked = sorted(items, key=value_of, reverse=True)[:TOP_ITEMS]
+    if not ranked:
+        return []
+    lines = [title]
+    for place, item in enumerate(ranked, start=1):
+        article = f" · {_esc(item.article)}" if item.article else ""
+        lines.append(f"{place}) {_wb_link(item.nm_id)}{article}: {_rub(value_of(item))}")
+    return lines
+
+
 def build_summary(conn: sqlite3.Connection, shop: ShopRow, date_str: str) -> str:
     """`date_str` — день в МСК (ГГГГ-ММ-ДД), за который подводится итог."""
-    asof = (datetime.strptime(date_str, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%dT12:00:00")
+    day = datetime.strptime(date_str, "%Y-%m-%d")
+    # yesterday_total у breakdown — это день ПЕРЕД asof, поэтому за нужный день
+    # спрашиваем «завтра», а за предыдущий — сам день.
+    asof_day = (day + timedelta(days=1)).strftime("%Y-%m-%dT12:00:00")
+    asof_prev = day.strftime("%Y-%m-%dT12:00:00")
+    prev_date = (day - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    def totals(event_type: str) -> dict:
+    def totals(event_type: str, asof: str) -> dict:
         return yesterday_today_breakdown(conn, shop.id, asof=asof, event_type=event_type)["yesterday_total"]
 
-    orders = totals("order")
-    buyouts = totals("buyout")
-    returns = totals("return")
-    cancels = _cancels(conn, shop.id, date_str)
-
-    pretty_date = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
-    lines = [
-        f"📊 <b>Сводка за {pretty_date}</b>",
-        "━━━━━━━━━━━━━━━━━━━",
-        f"🛒 Заказы: <b>{_qty_sum(orders)}</b>",
-        f"✅ Продажи: <b>{_qty_sum(buyouts)}</b>",
-        f"❌ Отмены: {_qty_sum(cancels)}",
-        f"🔄 Возвраты: {_qty_sum(returns)}",
+    blocks = [
+        ("📦 Заказы", totals("order", asof_day), totals("order", asof_prev), True),
+        ("❌ Отмены", _cancels(conn, shop.id, date_str), _cancels(conn, shop.id, prev_date), False),
+        ("✅ Продажи", totals("buyout", asof_day), totals("buyout", asof_prev), True),
+        ("🔄 Возвраты", totals("return", asof_day), totals("return", asof_prev), False),
     ]
 
-    if orders["qty"]:
-        lines.append(f"💰 Средний чек заказа: {_rub(orders['amount'] / orders['qty'])}")
+    pretty_date = day.strftime("%d.%m.%Y")
+    lines = [f"📊 <b>Сводка за {pretty_date}</b>", RULE]
+    for title, current, previous, higher_is_better in blocks:
+        lines.append(f"{title}: <b>{current['qty']} шт. · {_rub(current['amount'])}</b>")
+        lines.append(_delta_line(current, previous, higher_is_better))
 
-    top = _top_items(conn, shop.id, date_str)
-    if top:
-        lines += ["", "🏆 <b>Больше всего заказов:</b>"]
-        for place, item in enumerate(top, start=1):
-            title = item["name"] or f"nm {item['nm_id']}"
-            article = f" ({item['article']})" if item["article"] else ""
-            lines.append(f"{place}. {_esc(title)}{_esc(article)} — {item['qty']} шт")
+    economics = day_economics.for_day(conn, shop.id, date_str)
+    previous_economics = day_economics.for_day(conn, shop.id, prev_date)
+    pct = economics.commission_pct
+    lines += [
+        "",
+        f"💰 Комиссия: {_rub(economics.commission)}" + (f" ({pct:.1f}%)" if pct is not None else ""),
+        f"🚚 Логистика: {_rub(economics.logistics)} "
+        f"(прямая {_rub(economics.logistics_direct)} + возвратная {_rub(economics.logistics_return)})",
+        "",
+        f"💵 <b>Операционная прибыль: {_rub(economics.profit)}</b>",
+        _delta_line(
+            {"qty": 0, "amount": economics.profit},
+            {"qty": 0, "amount": previous_economics.profit},
+            higher_is_better=True,
+        ).replace("⚪️ 0 шт. · ", ""),
+    ]
+
+    for title, value_of in (
+        ("🔝 <b>Топ-5 по выручке:</b>", lambda i: i.revenue),
+        ("🏆 <b>Топ-5 по прибыли:</b>", lambda i: i.profit),
+    ):
+        top = _top_lines(title, economics.items, value_of)
+        if top:  # в день без продаж пустой заголовок оставил бы дыру в тексте
+            lines += [""] + top
 
     low = _low_stock(conn, shop.id)
     if low:
@@ -166,8 +219,8 @@ def build_summary(conn: sqlite3.Connection, shop: ShopRow, date_str: str) -> str
             article = f" ({item['article']})" if item["article"] else ""
             # Нулевой остаток — это не «хватит на 0 дней», а «уже закончился»:
             # заказы по товару идут, а продавать нечего.
-            tail = "закончился" if qty == 0 else f"{qty} шт ≈ на {days:g} дн."
-            lines.append(f"• {_esc(title)}{_esc(article)} — {tail}")
+            tail_text = "закончился" if qty == 0 else f"{qty} шт ≈ на {days:g} дн."
+            lines.append(f"• {_esc(title)}{_esc(article)} — {tail_text}")
 
     return "\n".join(lines)
 

@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from telegram.error import TelegramError
@@ -56,33 +57,62 @@ async def poll_and_notify(config: Config) -> None:
             logger.info("Активных магазинов нет — цикл опроса пропущен")
             return
 
-        for shop in shops:
-            try:
-                # Только что подключённый магазин (через /addshop или CLI) ещё не
-                # имеет карточек: они синкаются раз в сутки. Без них уведомление
-                # уйдёт без названия товара, фото, артикула и остатков — поэтому
-                # первый раз догоняем суточные шаги сразу, не дожидаясь ночи.
-                if not _has_cards(conn, shop.id):
-                    logger.info("shop_id=%s: карточек нет — первичный суточный синк", shop.id)
-                    await sync_shop_daily(conn, shop, config.token_encryption_key)
+        # Магазины обрабатываются ПАРАЛЛЕЛЬНО (правило проекта №5). Раньше это был
+        # последовательный цикл, и один медленный кабинет задерживал всех: на живом
+        # сервере цикл вместо пяти минут занимал три часа, а пропущенные запуски
+        # схлопывались (coalesce) — уведомления приходили раз в три часа пачкой.
+        await asyncio.gather(
+            *(_process_shop(conn, bot, shop, config) for shop in shops), return_exceptions=True
+        )
 
-                result = await sync_shop_frequent(conn, shop, config.token_encryption_key)
-                if result["error"]:
-                    logger.warning("shop_id=%s: синк с ошибкой (%s), уведомления пропускаю", shop.id, result["error"])
-                    continue
 
-                events = classify_shop_events(conn, shop.id)
-                new_events = sum(len(v) for v in events.values())
-                # Не привязано к first_run: кабинет мог синкаться часами и всё
-                # это время молчать, если отсечку так и не выставили руками
-                # (поймано вживую на shop_id=2). Вызов идемпотентен.
-                _start_notifying(conn, shop.id)
-                sent = await drain_queue_for_shop(conn, bot, shop, limit=DRAIN_LIMIT_PER_CYCLE)
-                logger.info("shop_id=%s: новых событий=%d, отправлено=%d", shop.id, new_events, sent)
-            except TelegramError as exc:
-                logger.error("shop_id=%s: ошибка Telegram при рассылке: %s", shop.id, exc)
-            except Exception:  # noqa: BLE001 — один магазин не должен ронять цикл
-                logger.exception("shop_id=%s: неожиданная ошибка в цикле опроса", shop.id)
+# Сколько ждём один магазин, прежде чем бросить его до следующего цикла. Меньше
+# интервала опроса: зависший кабинет не должен съедать чужое время.
+SHOP_CYCLE_TIMEOUT_SECONDS = 240
+# Первичный синк нового кабинета тянет карточки и рейтинги, регулярно упирается
+# в 429 с ожиданием — ему нужен запас побольше.
+BOOTSTRAP_TIMEOUT_SECONDS = 900
+
+
+async def _process_shop(conn, bot, shop, config: Config) -> None:
+    try:
+        # Только что подключённый магазин (через /addshop или CLI) ещё не имеет
+        # карточек: они синкаются раз в сутки. Без них уведомление уйдёт без
+        # названия товара, фото, артикула и остатков — поэтому первый раз
+        # догоняем суточные шаги сразу, не дожидаясь ночи.
+        if not _has_cards(conn, shop.id):
+            logger.info("shop_id=%s: карточек нет — первичный суточный синк", shop.id)
+            await asyncio.wait_for(
+                sync_shop_daily(conn, shop, config.token_encryption_key), BOOTSTRAP_TIMEOUT_SECONDS
+            )
+
+        result = await asyncio.wait_for(
+            sync_shop_frequent(conn, shop, config.token_encryption_key), SHOP_CYCLE_TIMEOUT_SECONDS
+        )
+        if result["failed_steps"]:
+            logger.warning(
+                "shop_id=%s: шаги с ошибкой (%s) — аналитика будет неполной, уведомления шлём",
+                shop.id,
+                ", ".join(result["failed_steps"]),
+            )
+        if result["error"]:
+            logger.warning("shop_id=%s: синк с ошибкой (%s), уведомления пропускаю", shop.id, result["error"])
+            return
+
+        events = classify_shop_events(conn, shop.id)
+        new_events = sum(len(v) for v in events.values())
+        # Не привязано к first_run: кабинет мог синкаться часами и всё
+        # это время молчать, если отсечку так и не выставили руками
+        # (поймано вживую на shop_id=2). Вызов идемпотентен.
+        _start_notifying(conn, shop.id)
+        sent = await drain_queue_for_shop(conn, bot, shop, limit=DRAIN_LIMIT_PER_CYCLE)
+        logger.info("shop_id=%s: новых событий=%d, отправлено=%d", shop.id, new_events, sent)
+    except asyncio.TimeoutError:
+        logger.error("shop_id=%s: цикл не уложился в отведённое время, продолжим в следующем", shop.id)
+    except TelegramError as exc:
+        logger.error("shop_id=%s: ошибка Telegram при рассылке: %s", shop.id, exc)
+    except Exception:  # noqa: BLE001 — один магазин не должен ронять цикл
+        logger.exception("shop_id=%s: неожиданная ошибка в цикле опроса", shop.id)
 
 
 async def flush_admin_alerts(conn, bot, config: Config) -> int:

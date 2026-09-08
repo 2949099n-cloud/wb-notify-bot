@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from wbnotify import shops_repo
 from wbnotify.config import Config
 from wbnotify.db import utcnow
 from wbnotify.scheduler.runner import build_scheduler
@@ -234,3 +235,58 @@ async def test_already_synced_shop_without_mark_starts_notifying(conn, monkeypat
 
     jobs._start_notifying(conn, shop_id)
     assert conn.execute("SELECT notify_from FROM shops WHERE id=?", (shop_id,)).fetchone()[0] is not None
+
+
+async def test_failed_step_does_not_abort_the_rest(conn, monkeypatch):
+    """Сбой одного шага синка не должен обрывать остальные и глушить кабинет.
+
+    Реальный случай: у кабинета с урезанным токеном «stocks» отдавал 403, цикл
+    обрывался на нём, классификация пропускалась — и десятки заказов висели в БД
+    со статусом «нет в очереди», уведомления по ним не приходили никогда.
+    """
+    from wbnotify import sync as sync_pkg
+    from wbnotify.wb_api.client import WBError
+
+    shop_id = _insert_shop(conn, notify_from=None)
+    shop = shops_repo.get_shop(conn, shop_id)
+    called = []
+
+    async def ok(conn_, shop_id_, token):
+        called.append("ok")
+        return 1
+
+    async def forbidden(conn_, shop_id_, token):
+        raise WBError("HTTP 403 Forbidden")
+
+    monkeypatch.setattr(sync_pkg.shops_repo, "get_decrypted_token", lambda *a, **kw: "t")
+    for step, func in (("orders", ok), ("sales", ok), ("stocks", forbidden), ("fbs", ok),
+                       ("seller_stocks", ok), ("funnel", ok)):
+        monkeypatch.setattr(sync_pkg, sync_pkg._STEP_FUNC_NAMES[step], func)
+
+    result = await sync_pkg.sync_shop_frequent(conn, shop, "key")
+
+    assert result["failed_steps"] == {"stocks": "HTTP 403 Forbidden"}
+    assert result["error"] is None, "сбой остатков не повод молчать по заказам"
+    assert len(called) == 5, "остальные шаги должны отработать"
+
+
+async def test_failed_orders_step_does_stop_notifications(conn, monkeypatch):
+    """А вот если не доехали сами заказы — уведомлять не по чему."""
+    from wbnotify import sync as sync_pkg
+    from wbnotify.wb_api.client import WBError
+
+    shop_id = _insert_shop(conn, notify_from=None)
+    shop = shops_repo.get_shop(conn, shop_id)
+
+    async def ok(conn_, shop_id_, token):
+        return 1
+
+    async def broken(conn_, shop_id_, token):
+        raise WBError("HTTP 500")
+
+    monkeypatch.setattr(sync_pkg.shops_repo, "get_decrypted_token", lambda *a, **kw: "t")
+    for step in sync_pkg.FREQUENT_STEPS:
+        monkeypatch.setattr(sync_pkg, sync_pkg._STEP_FUNC_NAMES[step], broken if step == "orders" else ok)
+
+    result = await sync_pkg.sync_shop_frequent(conn, shop, "key")
+    assert "orders" in result["error"]

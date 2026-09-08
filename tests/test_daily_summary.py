@@ -84,11 +84,10 @@ def test_summary_counts_orders_sales_cancels_and_returns(conn):
     text = daily_summary.build_summary(conn, shops_repo.get_shop(conn, shop_id), DAY)
 
     assert "Сводка за 03.09.2026" in text
-    assert "Заказы: <b>3 шт на 4 500 ₽</b>" in text
-    assert "Продажи: <b>1 шт на 900 ₽</b>" in text
-    assert "Отмены: 1 шт на 1 500 ₽" in text
-    assert "Возвраты: 1 шт на 800 ₽" in text
-    assert "Средний чек заказа: 1 500 ₽" in text
+    assert "📦 Заказы: <b>3 шт. · 4 500 ₽</b>" in text
+    assert "✅ Продажи: <b>1 шт. · 900 ₽</b>" in text
+    assert "❌ Отмены: <b>1 шт. · 1 500 ₽</b>" in text
+    assert "🔄 Возвраты: <b>1 шт. · 800 ₽</b>" in text
 
 
 def test_summary_ignores_other_days(conn):
@@ -97,22 +96,52 @@ def test_summary_ignores_other_days(conn):
     _order(conn, shop_id, "other", price=9999.0, day="2026-09-01")
 
     text = daily_summary.build_summary(conn, shops_repo.get_shop(conn, shop_id), DAY)
-    assert "Заказы: <b>1 шт на 1 000 ₽</b>" in text
+    assert "📦 Заказы: <b>1 шт. · 1 000 ₽</b>" in text
 
 
-def test_summary_lists_top_items(conn):
+def test_summary_ranks_items_by_revenue_and_profit(conn):
+    """Топы строятся по деньгам продаж, а не по числу заказов."""
     shop_id = _shop(conn)
-    conn.execute(
-        "INSERT INTO cards_cache (shop_id, nm_id, name, refreshed_at) VALUES (?, 555, 'Ботинки', ?)",
-        (shop_id, utcnow()),
-    )
-    conn.commit()
-    for index in range(3):
-        _order(conn, shop_id, f"s{index}")
+    _sale(conn, shop_id, "S1", nm_id=555, price=1000.0)
+    _sale(conn, shop_id, "S2", nm_id=777, price=3000.0)
 
     text = daily_summary.build_summary(conn, shops_repo.get_shop(conn, shop_id), DAY)
-    assert "Больше всего заказов" in text
-    assert "1. Ботинки (ART-1) — 3 шт" in text
+    revenue_block = text.split("Топ-5 по выручке")[1]
+    assert revenue_block.index("777") < revenue_block.index("555"), "дороже — выше"
+    assert "Топ-5 по прибыли" in text
+    assert 'href="https://www.wildberries.ru/catalog/777/detail.aspx"' in text
+
+
+def test_summary_compares_with_previous_day(conn):
+    """Под каждой строкой — изменение ко вчера, цвет по смыслу метрики."""
+    shop_id = _shop(conn)
+    # Отменённый заказ остаётся заказом того дня — WB его из заказов не вычитает,
+    # поэтому в счёт строки «Заказы» он тоже попадает.
+    _order(conn, shop_id, "y1", price=1000.0, day="2026-09-02")
+    _order(conn, shop_id, "t1", price=1000.0)
+    _order(conn, shop_id, "t2", price=1000.0)
+    _order(conn, shop_id, "t3", price=1000.0)
+    # Отмен вчера было две, сегодня одна — падение отмен это хорошо, зелёное.
+    _order(conn, shop_id, "yc1", price=500.0, cancelled=True, day="2026-09-02")
+    _order(conn, shop_id, "yc2", price=500.0, cancelled=True, day="2026-09-02")
+    _order(conn, shop_id, "tc1", price=500.0, cancelled=True)
+
+    text = daily_summary.build_summary(conn, shops_repo.get_shop(conn, shop_id), DAY)
+    orders_delta = text.split("📦 Заказы")[1].splitlines()[1]
+    cancels_delta = text.split("❌ Отмены")[1].splitlines()[1]
+
+    assert "🟢 +1 шт." in orders_delta, "рост заказов — зелёный"
+    assert "🟢 −1 шт." in cancels_delta, "падение отмен — тоже зелёный"
+
+
+def test_summary_shows_commission_logistics_and_profit(conn):
+    shop_id = _shop(conn)
+    _sale(conn, shop_id, "S1", price=1000.0)
+
+    text = daily_summary.build_summary(conn, shops_repo.get_shop(conn, shop_id), DAY)
+    assert "💰 Комиссия:" in text
+    assert "🚚 Логистика:" in text and "прямая" in text and "возвратная" in text
+    assert "Операционная прибыль" in text
 
 
 def test_zero_stock_says_sold_out_not_zero_days(conn):

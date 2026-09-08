@@ -186,6 +186,23 @@ def build_summary(conn: sqlite3.Connection, shop: ShopRow, date_str: str) -> str
         lines.append(f"{title}: <b>{current['qty']} шт. · {_rub(current['amount'])}</b>")
         lines.append(_delta_line(current, previous, higher_is_better))
 
+    # WB отдаёт разное число заказов в двух своих источниках: воронка (её видно
+    # в приложении и в сводке ЛК) считает больше, чем поштучная выдача
+    # statistics/orders. Проверено на устоявшихся днях: 46 против 35, 48 против
+    # 37 — это не задержка. Уведомления можно строить только по поштучной выдаче,
+    # поэтому разрыв объясняем прямо здесь, иначе он выглядит как пропавшие
+    # уведомления.
+    detailed = conn.execute(
+        "SELECT COUNT(*) FROM orders WHERE shop_id = ? AND substr(date,1,10) = ?",
+        (shop.id, date_str),
+    ).fetchone()[0]
+    hidden = blocks[0][1]["qty"] - detailed
+    if hidden > 0:
+        lines.append(
+            f"   ℹ️ Поштучно WB отдал {detailed} из {blocks[0][1]['qty']}: "
+            f"по {hidden} заказам уведомлений не будет (ограничение API WB)"
+        )
+
     economics = day_economics.for_day(conn, shop.id, date_str)
     previous_economics = day_economics.for_day(conn, shop.id, prev_date)
     pct = economics.commission_pct

@@ -252,3 +252,57 @@ async def test_deferred_support_message_remembers_who_to_answer(conn, tmp_path):
     assert sent == 1
     thread = admin.thread_by_message(conn, 777)
     assert (thread["user_id"], thread["chat_id"]) == (OWNER_ID, OWNER_CHAT)
+
+
+def test_degraded_alert_is_sent_once_per_day(conn):
+    """Сбойный шаг повторяется каждые 5 минут — владелец бота не должен получать
+    триста одинаковых сообщений в сутки."""
+    shop_id = _shop(conn)
+
+    assert admin_alerts.queue_once_per_day(conn, "sync_degraded", "остатки: 403", shop_id) is True
+    assert admin_alerts.queue_once_per_day(conn, "sync_degraded", "остатки: 403", shop_id) is False
+
+    queued = [a for a in admin_alerts.pending(conn) if a["kind"] == "sync_degraded"]
+    assert len(queued) == 1
+
+
+def test_degraded_alert_repeats_next_day(conn):
+    """Проблема держится неделями — напоминать раз в сутки всё-таки надо."""
+    from datetime import datetime, timedelta, timezone
+
+    shop_id = _shop(conn)
+    admin_alerts.queue_once_per_day(conn, "sync_degraded", "остатки: 403", shop_id)
+    stale = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    conn.execute("UPDATE admin_alerts SET created_at = ? WHERE kind = 'sync_degraded'", (stale,))
+    conn.commit()
+
+    assert admin_alerts.queue_once_per_day(conn, "sync_degraded", "остатки: 403", shop_id) is True
+
+
+def test_degraded_alert_is_per_shop(conn):
+    """Сбой у одного клиента не должен глушить предупреждение по другому."""
+    first = _shop(conn)
+    second = conn.execute(
+        """
+        INSERT INTO shops (owner_user_id, telegram_chat_id, name, wb_api_token_encrypted,
+                           token_status, is_active, created_at, updated_at)
+        VALUES (777, 7000, 'Другой', X'00', 'active', 1, ?, ?)
+        """,
+        (utcnow(), utcnow()),
+    ).lastrowid
+    conn.commit()
+
+    assert admin_alerts.queue_once_per_day(conn, "sync_degraded", "текст", first) is True
+    assert admin_alerts.queue_once_per_day(conn, "sync_degraded", "текст", second) is True
+
+
+def test_degraded_alert_names_shop_owner_and_step(conn):
+    from wbnotify.scheduler.jobs import _alert_degraded
+
+    shop_id = _shop(conn)
+    _alert_degraded(conn, shops_repo.get_shop(conn, shop_id), {"stocks": "HTTP 403 Forbidden"})
+
+    alert = [a for a in admin_alerts.pending(conn) if a["kind"] == "sync_degraded"][-1]
+    assert "NILONIL" in alert["text"] and "@natali" in alert["text"]
+    assert "остатки на складах WB" in alert["text"]
+    assert "Аналитика" in alert["text"], "подсказка, что делать клиенту"

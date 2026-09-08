@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from wbnotify.db import utcnow
 
@@ -23,7 +24,12 @@ KINDS = {
     "account_deleted": "🗑 Аккаунт удалён",
     # Обращение, которое не удалось передать сразу (служебный бот был недоступен).
     "support": "⏳ Доставлено с задержкой",
+    "sync_degraded": "⚠️ Кабинет работает частично",
 }
+
+# Повторяющиеся проблемы (например, урезанный токен клиента) шлём не чаще раза
+# в сутки: они держатся неделями, а цикл опроса идёт каждые пять минут.
+DEDUP_WINDOW_HOURS = 24
 
 
 def queue(
@@ -41,6 +47,24 @@ def queue(
         (kind, shop_id, text, json.dumps(payload, ensure_ascii=False) if payload else None, utcnow()),
     )
     conn.commit()
+
+
+def queue_once_per_day(conn: sqlite3.Connection, kind: str, text: str, shop_id: int | None = None) -> bool:
+    """Ставит алерт, если такой же по этому кабинету не ставился за сутки.
+
+    Возвращает True, если поставили. Нужно для постоянных, а не разовых проблем:
+    сбойный шаг синка повторяется каждые пять минут, и без этого владелец бота
+    получал бы триста одинаковых сообщений в день.
+    """
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=DEDUP_WINDOW_HOURS)).isoformat()
+    already = conn.execute(
+        "SELECT 1 FROM admin_alerts WHERE kind = ? AND shop_id IS ? AND created_at >= ? LIMIT 1",
+        (kind, shop_id, cutoff),
+    ).fetchone()
+    if already:
+        return False
+    queue(conn, kind, text, shop_id)
+    return True
 
 
 def payload_of(alert: sqlite3.Row) -> dict:

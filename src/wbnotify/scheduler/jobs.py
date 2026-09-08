@@ -95,6 +95,7 @@ async def _process_shop(conn, bot, shop, config: Config) -> None:
                 shop.id,
                 ", ".join(result["failed_steps"]),
             )
+            _alert_degraded(conn, shop, result["failed_steps"])
         if result["error"]:
             logger.warning("shop_id=%s: синк с ошибкой (%s), уведомления пропускаю", shop.id, result["error"])
             return
@@ -113,6 +114,38 @@ async def _process_shop(conn, bot, shop, config: Config) -> None:
         logger.error("shop_id=%s: ошибка Telegram при рассылке: %s", shop.id, exc)
     except Exception:  # noqa: BLE001 — один магазин не должен ронять цикл
         logger.exception("shop_id=%s: неожиданная ошибка в цикле опроса", shop.id)
+
+
+# Человеческие названия шагов синка: владелец бота читает алерт, а не наш код.
+STEP_TITLES = {
+    "orders": "заказы",
+    "sales": "продажи",
+    "stocks": "остатки на складах WB",
+    "fbs": "задания FBS",
+    "seller_stocks": "остатки своих складов",
+    "funnel": "воронка продаж",
+    "cards": "карточки товаров",
+    "analytics": "рейтинг и отзывы",
+}
+
+
+def _alert_degraded(conn, shop, failed_steps: dict) -> None:
+    """Сообщает владельцу бота, что у кабинета клиента что-то стабильно не работает.
+
+    Иначе о таком узнаёшь только из логов: у клиента с урезанным токеном шаг
+    «остатки» падал с 403 несколько суток подряд, и заметили это лишь когда он
+    пожаловался, что нет уведомлений.
+    """
+    from wbnotify import members_repo
+
+    lines = [f"«{shop.name}» (id {shop.id}, {members_repo.describe_user(conn, shop.owner_user_id)})"]
+    for step, error in failed_steps.items():
+        lines.append(f"• {STEP_TITLES.get(step, step)}: {str(error)[:200]}")
+    lines.append("Уведомления идут, но аналитика в них неполная.")
+    if "stocks" in failed_steps or "analytics" in failed_steps:
+        lines.append("Похоже на токен без категории «Аналитика» — клиенту нужно пересоздать его.")
+
+    admin_alerts.queue_once_per_day(conn, "sync_degraded", "\n".join(lines), shop.id)
 
 
 async def flush_admin_alerts(conn, bot, config: Config) -> int:

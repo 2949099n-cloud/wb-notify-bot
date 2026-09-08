@@ -230,14 +230,11 @@ async def test_pin_failure_does_not_lose_the_summary(conn):
     assert len(bot.messages) == 1
 
 
-def test_summary_explains_orders_wb_does_not_publish_individually(conn):
-    """У WB два источника с разным числом заказов: воронка (её видно в приложении)
-    считает больше, чем поштучная выдача. Разрыв объясняем в сводке, иначе он
-    выглядит как пропавшие уведомления."""
+def test_summary_does_not_mention_the_wb_source_gap(conn):
+    """Пояснение про разрыв между источниками WB из сводки убрано (решение
+    пользователя): сводка — про цифры дня, а не про наши ограничения."""
     shop_id = _shop(conn)
     _order(conn, shop_id, "s1")
-    _order(conn, shop_id, "s2")
-    # Воронка за тот же день говорит, что заказов было пять.
     conn.execute(
         """
         INSERT INTO sales_funnel_daily (shop_id, date_msk, nm_id, order_count, order_sum,
@@ -249,13 +246,6 @@ def test_summary_explains_orders_wb_does_not_publish_individually(conn):
     conn.commit()
 
     text = daily_summary.build_summary(conn, shops_repo.get_shop(conn, shop_id), DAY)
-    assert "Поштучно WB отдал 2 из 5" in text
-    assert "по 3 заказам уведомлений не будет" in text
-
-
-def test_no_gap_note_when_sources_agree(conn):
-    shop_id = _shop(conn)
-    _order(conn, shop_id, "s1")
-
-    text = daily_summary.build_summary(conn, shops_repo.get_shop(conn, shop_id), DAY)
-    assert "Поштучно WB отдал" not in text
+    assert "Поштучно" not in text
+    assert "ограничение API" not in text
+    assert "📦 Заказы: <b>5 шт." in text, "сами цифры дня считаются по воронке, как в приложении WB"

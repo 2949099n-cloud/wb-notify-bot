@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -394,6 +394,28 @@ def init_db(db_path: str) -> None:
         _backfill_owners(conn)
     finally:
         conn.close()
+
+
+# На сколько отматываем курсор синка назад при каждом запросе.
+#
+# WB отдаёт часть заказов С ОПОЗДАНИЕМ, сохраняя им ИСХОДНЫЙ lastChangeDate
+# (проверено вживую: заказы за 12:29 и 15:19 появились в отчёте WB, но в API
+# приехали позже, когда наш курсор уже стоял на 16:00 — и не вернулись НИКОГДА,
+# потому что фильтр dateFrom их отсекал). Строгий курсор такие строки теряет
+# навсегда. Перекрытие делает запрос чуть тяжелее, но дедуп по UNIQUE(shop_id,
+# srid) гарантирует, что повторные строки просто обновятся, а не задвоятся.
+SYNC_LOOKBACK_HOURS = 24
+
+
+def shift_cursor_back(cursor: str | None, hours: int = SYNC_LOOKBACK_HOURS) -> str | None:
+    """Курсор минус перекрытие. None остаётся None — значит, синк с нуля."""
+    if not cursor:
+        return None
+    try:
+        parsed = datetime.fromisoformat(cursor)
+    except ValueError:
+        return cursor
+    return (parsed - timedelta(hours=hours)).isoformat()
 
 
 def get_cursor(conn: sqlite3.Connection, shop_id: int, endpoint: str) -> str | None:

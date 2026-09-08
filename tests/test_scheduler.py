@@ -290,3 +290,51 @@ async def test_failed_orders_step_does_stop_notifications(conn, monkeypatch):
 
     result = await sync_pkg.sync_shop_frequent(conn, shop, "key")
     assert "orders" in result["error"]
+
+
+def test_cursor_is_shifted_back_for_late_rows():
+    """WB отдаёт часть заказов задним числом, с исходным lastChangeDate.
+
+    Строгий курсор такие строки терял навсегда: фильтр dateFrom их отсекал.
+    Поймано вживую — заказы за 12:29 и 15:19 были в отчёте WB и не появились
+    в боте, при этом соседние по времени пришли.
+    """
+    from wbnotify.db import SYNC_LOOKBACK_HOURS, shift_cursor_back
+
+    assert shift_cursor_back("2026-09-08T16:00:00") == "2026-09-07T16:00:00"
+    assert SYNC_LOOKBACK_HOURS == 24
+
+
+def test_shift_cursor_back_survives_empty_and_broken_values():
+    """Пустой курсор — это «синк с нуля», его отматывать нельзя."""
+    from wbnotify.db import shift_cursor_back
+
+    assert shift_cursor_back(None) is None
+    assert shift_cursor_back("") is None
+    assert shift_cursor_back("не-дата") == "не-дата"
+
+
+async def test_orders_sync_requests_with_overlap_but_keeps_cursor_forward(conn, monkeypatch):
+    """Запрашиваем с перекрытием назад, а курсор двигаем только вперёд —
+    иначе он уезжал бы на сутки назад при каждом синке."""
+    from wbnotify.db import set_cursor, get_cursor
+    from wbnotify.sync import orders_sync
+
+    shop_id = _insert_shop(conn, notify_from=None)
+    set_cursor(conn, shop_id, "orders", "2026-09-08T16:00:00")
+    conn.commit()
+    asked = []
+
+    async def fake_get_orders(token, date_from, flag=0):
+        asked.append(date_from)
+        return [{
+            "srid": "late-1", "date": "2026-09-08T12:29:00", "lastChangeDate": "2026-09-08T12:29:00",
+            "nmId": 1, "techSize": "37", "supplierArticle": "1/3020",
+        }]
+
+    monkeypatch.setattr(orders_sync, "get_orders", fake_get_orders)
+    await orders_sync.sync_shop_orders(conn, shop_id, "token")
+
+    assert asked == ["2026-09-07T16:00:00"], "запрос уходит с перекрытием"
+    assert get_cursor(conn, shop_id, "orders") == "2026-09-08T16:00:00", "курсор не откатился"
+    assert conn.execute("SELECT COUNT(*) FROM orders WHERE srid='late-1'").fetchone()[0] == 1

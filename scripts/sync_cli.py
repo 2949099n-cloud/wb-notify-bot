@@ -90,6 +90,42 @@ def cmd_sync(args: argparse.Namespace) -> int:
     return asyncio.run(run())
 
 
+def cmd_resync(args) -> int:
+    """Глубокий перезабор заказов и продаж за последние N дней, минуя курсор.
+
+    Нужен после того, как WB отдал события задним числом: обычный синк ходит от
+    курсора с суточным перекрытием, а тут можно вычерпать хоть неделю. Дубликатов
+    не создаёт — дедуп по UNIQUE(shop_id, srid); уже отправленные уведомления
+    повторно не уйдут (у них проставлен notified_*_at).
+    """
+    from datetime import timedelta
+
+    from wbnotify.counters import now_msk
+    from wbnotify.sync.orders_sync import sync_shop_orders
+    from wbnotify.sync.sales_sync import sync_shop_sales
+
+    config = load_config()
+    date_from = (now_msk() - timedelta(days=args.days)).strftime("%Y-%m-%dT%H:%M:%S")
+
+    async def run(conn, shop):
+        token = shops_repo.get_decrypted_token(conn, shop.id, config.token_encryption_key)
+        orders = await sync_shop_orders(conn, shop.id, token, date_from_override=date_from)
+        sales = await sync_shop_sales(conn, shop.id, token, date_from_override=date_from)
+        return orders, sales
+
+    with db_session(config.db_path) as conn:
+        before = conn.execute("SELECT COUNT(*) FROM orders WHERE shop_id = ?", (args.shop_id,)).fetchone()[0]
+        shop = shops_repo.get_shop(conn, args.shop_id)
+        orders, sales = asyncio.run(run(conn, shop))
+        after = conn.execute("SELECT COUNT(*) FROM orders WHERE shop_id = ?", (args.shop_id,)).fetchone()[0]
+
+    print(f"Кабинет «{shop.name}»: перезабор с {date_from}")
+    print(f"  обработано строк: заказы {orders}, продажи {sales}")
+    print(f"  НОВЫХ заказов добавлено: {after - before}")
+    print("Уведомления по ним уйдут ближайшим циклом, если событию меньше 7 дней.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -106,6 +142,13 @@ def main() -> int:
     group.add_argument("--shop-id", type=int)
     p_sync.add_argument("--once", action="store_true", default=True)
     p_sync.set_defaults(func=cmd_sync)
+
+    p_resync = sub.add_parser(
+        "resync", help="Перезабрать заказы и продажи за N дней, минуя курсор (WB отдал задним числом)"
+    )
+    p_resync.add_argument("--shop-id", type=int, required=True)
+    p_resync.add_argument("--days", type=int, default=3)
+    p_resync.set_defaults(func=cmd_resync)
 
     args = parser.parse_args()
     try:

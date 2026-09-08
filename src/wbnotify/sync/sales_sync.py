@@ -5,7 +5,7 @@ import json
 import logging
 import sqlite3
 
-from wbnotify.db import get_cursor, set_cursor
+from wbnotify.db import get_cursor, set_cursor, shift_cursor_back
 from wbnotify.wb_api.sales import get_sales
 
 logger = logging.getLogger(__name__)
@@ -59,9 +59,14 @@ def _upsert_sale(conn: sqlite3.Connection, shop_id: int, row: dict) -> None:
     )
 
 
-async def sync_shop_sales(conn: sqlite3.Connection, shop_id: int, token: str) -> int:
-    date_from = get_cursor(conn, shop_id, "sales") or DEFAULT_DATE_FROM
-    max_change_date = date_from
+async def sync_shop_sales(
+    conn: sqlite3.Connection, shop_id: int, token: str, date_from_override: str | None = None
+) -> int:
+    """Как и заказы, запрашиваем с перекрытием назад: WB отдаёт часть продаж с
+    опозданием, сохраняя исходный lastChangeDate (см. db.SYNC_LOOKBACK_HOURS)."""
+    cursor = get_cursor(conn, shop_id, "sales")
+    date_from = date_from_override or shift_cursor_back(cursor) or DEFAULT_DATE_FROM
+    max_change_date = cursor or DEFAULT_DATE_FROM
     processed = 0
 
     for _ in range(MAX_PAGES):

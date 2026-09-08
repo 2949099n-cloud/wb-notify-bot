@@ -5,7 +5,7 @@ import json
 import logging
 import sqlite3
 
-from wbnotify.db import get_cursor, set_cursor
+from wbnotify.db import get_cursor, set_cursor, shift_cursor_back
 from wbnotify.wb_api.orders import get_orders
 
 logger = logging.getLogger(__name__)
@@ -62,10 +62,21 @@ def _upsert_order(conn: sqlite3.Connection, shop_id: int, row: dict) -> None:
     )
 
 
-async def sync_shop_orders(conn: sqlite3.Connection, shop_id: int, token: str) -> int:
-    """Возвращает число новых+обновлённых строк, обработанных за этот вызов."""
-    date_from = get_cursor(conn, shop_id, "orders") or DEFAULT_DATE_FROM
-    max_change_date = date_from
+async def sync_shop_orders(
+    conn: sqlite3.Connection, shop_id: int, token: str, date_from_override: str | None = None
+) -> int:
+    """Возвращает число новых+обновлённых строк, обработанных за этот вызов.
+
+    Запрашиваем не «строго с курсора», а с перекрытием назад (см.
+    db.SYNC_LOOKBACK_HOURS): WB отдаёт часть заказов с опозданием, сохраняя им
+    исходный lastChangeDate, и строгий курсор терял их навсегда.
+    `date_from_override` — для ручного глубокого перезабора через sync_cli.
+    """
+    cursor = get_cursor(conn, shop_id, "orders")
+    date_from = date_from_override or shift_cursor_back(cursor) or DEFAULT_DATE_FROM
+    # Курсор двигаем от РЕАЛЬНОГО значения, а не от отмотанного, иначе он поехал
+    # бы назад на сутки при каждом синке.
+    max_change_date = cursor or DEFAULT_DATE_FROM
     processed = 0
 
     for _ in range(MAX_PAGES):

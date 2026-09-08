@@ -144,8 +144,9 @@ def test_summary_shows_commission_logistics_and_profit(conn):
     assert "Операционная прибыль" in text
 
 
-def test_zero_stock_says_sold_out_not_zero_days(conn):
-    """«≈ на 0 дн.» читается как «скоро кончится», хотя товара уже нет."""
+def test_low_stock_shows_both_articles_and_days(conn):
+    """В блоке остатков — артикул WB и артикул продавца, срок в днях (решение
+    пользователя): по названию товар не опознать, они почти одинаковые."""
     shop_id = _shop(conn)
     from wbnotify.counters import now_msk
 
@@ -153,8 +154,20 @@ def test_zero_stock_says_sold_out_not_zero_days(conn):
     _order(conn, shop_id, "fresh", day=today)
 
     text = daily_summary.build_summary(conn, shops_repo.get_shop(conn, shop_id), today)
-    assert "закончился" in text
-    assert "на 0 дн." not in text
+    block = text[text.index("Заканчивается"):]
+    assert "555" in block and "ART-1" in block, "оба артикула на месте"
+    assert "на 0 дней" in block, "нулевой запас — тоже в днях, для единообразия"
+    assert "закончился" not in block
+
+
+def test_days_are_declined_properly():
+    """«на 1 дней» в отчёте выглядело бы неряшливо."""
+    from wbnotify.telegram.daily_summary import _days
+
+    assert [_days(v) for v in (0, 1, 2, 5, 11, 21, 22)] == [
+        "0 дней", "1 день", "2 дня", "5 дней", "11 дней", "21 день", "22 дня",
+    ]
+    assert _days(6.5) == "6.5 дня"
 
 
 async def test_summary_goes_to_every_member_and_is_pinned(conn):

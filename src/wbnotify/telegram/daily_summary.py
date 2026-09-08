@@ -146,6 +146,22 @@ def _signed_pct(value: float) -> str:
     return f"{'+' if value > 0 else MINUS if value < 0 else ''}{abs(value):.1f}%"
 
 
+def _days(value: float) -> str:
+    """«1 день», «2 дня», «5 дней», «2.5 дня» — по правилам русского языка.
+    Без этого в колонке остатков стояло бы «на 1 дней»."""
+    if value != int(value):
+        return f"{value:g} дня"
+    number = int(value)
+    if 11 <= number % 100 <= 14:
+        return f"{number} дней"
+    last = number % 10
+    if last == 1:
+        return f"{number} день"
+    if 2 <= last <= 4:
+        return f"{number} дня"
+    return f"{number} дней"
+
+
 def _wb_link(nm_id: int) -> str:
     return f'<a href="{WB_CARD_URL.format(nm_id=nm_id)}">{nm_id}</a>'
 
@@ -223,12 +239,12 @@ def build_summary(conn: sqlite3.Connection, shop: ShopRow, date_str: str) -> str
     if low:
         lines += ["", f"📦 <b>Заканчивается</b> (меньше {LOW_STOCK_DAYS} дн.):"]
         for item, qty, days in low:
-            title = item["name"] or f"nm {item['nm_id']}"
-            article = f" ({item['article']})" if item["article"] else ""
-            # Нулевой остаток — это не «хватит на 0 дней», а «уже закончился»:
-            # заказы по товару идут, а продавать нечего.
-            tail_text = "закончился" if qty == 0 else f"{qty} шт ≈ на {days:g} дн."
-            lines.append(f"• {_esc(title)}{_esc(article)} — {tail_text}")
+            # Артикул WB и артикул продавца, как в топах: по названию товар не
+            # опознать — у соседних карточек они почти одинаковые (решение
+            # пользователя). Нулевой запас пишем «на 0 дней», а не словом
+            # «закончился», чтобы вся колонка читалась единообразно.
+            article = f" · {_esc(item['article'])}" if item["article"] else ""
+            lines.append(f"• {_wb_link(item['nm_id'])}{article} — на {_days(days)}")
 
     return "\n".join(lines)
 
